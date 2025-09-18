@@ -21,6 +21,7 @@ import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from html import escape
+from app.services.ui_helpers import attach_reply_kb as svc_attach_reply_kb
 
 # Add Berlin timezone
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -102,9 +103,6 @@ async def actions(message: Message):
 
 @router.callback_query(F.data == "hint:importzip")
 async def hint_zip(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
-    from app.db import session_scope
     txt = (
         "Импорт ZIP:\n"
         "1) Прикрепите .zip как файл\n"
@@ -116,9 +114,8 @@ async def hint_zip(cb: CallbackQuery):
             await cb.message.delete()
         except:
             pass
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer(txt, reply_markup=build_reply_kb(chat_on))
+        await cb.message.answer(txt)
+        await svc_attach_reply_kb(cb.message, cb.from_user.id)
     await cb.answer()
 
 # ── Status (кнопка) ────────────────────────────────────────────────────────────
@@ -127,8 +124,6 @@ async def hint_zip(cb: CallbackQuery):
 async def status_show(cb: CallbackQuery):
     from app.db import session_scope
     from app.handlers.status import render_status
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     async with session_scope() as st:
         text = await render_status(st, cb.from_user.id if cb.from_user else 0)
         if cb.message and isinstance(cb.message, Message):
@@ -136,8 +131,8 @@ async def status_show(cb: CallbackQuery):
                 await cb.message.delete()
             except:
                 pass
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer(text, reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer(text)
+            await svc_attach_reply_kb(cb.message, cb.from_user.id)
     await cb.answer()
 
 # ── Context presets ────────────────────────────────────────────────────────────
@@ -145,8 +140,6 @@ async def status_show(cb: CallbackQuery):
 @router.callback_query(F.data == "ctx:reset")
 async def ctx_reset(cb: CallbackQuery):
     from app.db import session_scope
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     async with session_scope() as st:
         await set_context_filters(st, cb.from_user.id if cb.from_user else 0, kinds_csv="", tags_csv="")
         await st.commit()
@@ -155,15 +148,13 @@ async def ctx_reset(cb: CallbackQuery):
                 await cb.message.delete()
             except:
                 pass
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer("Фильтры контекста сброшены. Используется вся память проекта.", reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer("Фильтры контекста сброшены. Используется вся память проекта.")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id)
     await cb.answer()
 
 @router.callback_query(F.data.startswith("ctx:tags:"))
 async def ctx_presets(cb: CallbackQuery):
     from app.db import session_scope
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
     tag = cb.data.split(":")[-1]
@@ -175,8 +166,8 @@ async def ctx_presets(cb: CallbackQuery):
                 await cb.message.delete()
             except:
                 pass
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer(f"Фильтры обновлены: tags={tag}", reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer(f"Фильтры обновлены: tags={tag}")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id)
     await cb.answer()
 
 # ── Model switch (cycle) ───────────────────────────────────────────────────────
@@ -186,8 +177,7 @@ async def model_switch(cb: CallbackQuery):
     if not cb.data:
         return await cb.answer("Invalid data")
     from app.db import session_scope
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags, get_preferred_model, set_preferred_model
+    from app.services.memory import get_preferred_model, set_preferred_model
     async with session_scope() as session:
         user_id = cb.from_user.id if cb.from_user else 0
         if cb.data == "model:cycle":
@@ -207,8 +197,8 @@ async def model_switch(cb: CallbackQuery):
                 await cb.message.delete()
             except:
                 pass
-            chat_on, *_ = await get_chat_flags(session, user_id)
-            await cb.message.answer(f"Модель установлена: {applied}", reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer(f"Модель установлена: {applied}")
+            await svc_attach_reply_kb(cb.message, user_id)
     await cb.answer(f"Модель установлена: {applied}")
 
 # ── Import wizard (последний файл) ─────────────────────────────────────────────
@@ -220,7 +210,6 @@ def _extract_doc_tag(name: str) -> str | None:
 @router.callback_query(F.data == "wizard:import")
 async def wizard_import(cb: CallbackQuery):
     from app.db import session_scope
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
     from app.services.memory import get_chat_flags, get_active_project, _ensure_user_state
     from app.services.artifacts import create_import
     from app.config import settings
@@ -237,9 +226,9 @@ async def wizard_import(cb: CallbackQuery):
                     await cb.message.delete()
                 except:
                     pass
-                chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-                await cb.message.answer("Нет «последнего файла». Пришлите .txt/.md/.json/.zip и повторите.", reply_markup=build_reply_kb(chat_on))
-                return await cb.answer()
+                await cb.message.answer("Нет «последнего файла». Пришлите .txt/.md/.json/.zip и повторите.")
+                await svc_attach_reply_kb(cb.message, cb.from_user.id)
+            return await cb.answer()
 
         if not cb.message or not isinstance(cb.message, Message) or not cb.message.bot:
             return await cb.answer("Ошибка: нет доступа к боту")
@@ -249,8 +238,8 @@ async def wizard_import(cb: CallbackQuery):
                 await cb.message.delete()
             except:
                 pass
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer("Нет «последнего файла». Пришлите .txt/.md/.json/.zip и повторите.", reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer("Нет «последнего файла». Пришлите .txt/.md/.json/.zip и повторите.")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id)
             return await cb.answer()
 
         try:
@@ -260,8 +249,8 @@ async def wizard_import(cb: CallbackQuery):
                     await cb.message.delete()
                 except:
                     pass
-                chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-                await cb.message.answer("Не удалось скачать файл (download вернул None)", reply_markup=build_reply_kb(chat_on))
+                await cb.message.answer("Не удалось скачать файл (download вернул None)")
+                await svc_attach_reply_kb(cb.message, cb.from_user.id)
                 return await cb.answer()
                 
             data = fb.read()
@@ -271,8 +260,8 @@ async def wizard_import(cb: CallbackQuery):
                 await cb.message.delete()
             except:
                 pass
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer(f"Ошибка при получении файла: {str(e)}", reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer(f"Ошибка при получении файла: {str(e)}")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id)
             return await cb.answer()
 
         proj = await get_active_project(st, cb.from_user.id if cb.from_user else 0)
@@ -281,8 +270,8 @@ async def wizard_import(cb: CallbackQuery):
                 await cb.message.delete()
             except:
                 pass
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer("Сначала выбери проект: Actions → Projects.", reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer("Сначала выбери проект: Actions → Projects.")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id)
             return await cb.answer()
 
         date_tag = f"rel-{datetime.now(BERLIN).date().isoformat()}"
@@ -325,8 +314,8 @@ async def wizard_import(cb: CallbackQuery):
                     await cb.message.delete()
                 except:
                     pass
-                chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-                await cb.message.answer(f"Ошибка при импорте ZIP: {str(e)}", reply_markup=build_reply_kb(chat_on))
+                await cb.message.answer(f"Ошибка при импорте ZIP: {str(e)}")
+                await svc_attach_reply_kb(cb.message, cb.from_user.id)
                 return await cb.answer()
 
         text = data.decode("utf-8", errors="ignore")
@@ -359,14 +348,12 @@ async def wizard_import_last(cb: CallbackQuery):
 # ── Quick ASK templates ────────────────────────────────────────────────────────
 
 async def _ask_with_template(cb: CallbackQuery, template: str):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     async with session_scope() as session:
         proj = await get_active_project(session, cb.from_user.id if cb.from_user else 0)
         if not proj:
             if cb.message and isinstance(cb.message, Message):
-                chat_on, *_ = await get_chat_flags(session, cb.from_user.id if cb.from_user else 0)
-                await cb.message.answer("Сначала выберите проект: <code>/project &lt;name&gt;</code>", reply_markup=build_reply_kb(chat_on))
+                await cb.message.answer("Сначала выберите проект: <code>/project <name></code>")
+                await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
             return
         ctx = await gather_context(session, proj, user_id=cb.from_user.id if cb.from_user else 0, max_chunks=settings.project_max_chunks)
         model = await get_preferred_model(session, cb.from_user.id if cb.from_user else 0)
@@ -376,8 +363,6 @@ async def _ask_with_template(cb: CallbackQuery, template: str):
 
 @router.callback_query(F.data.startswith("ask:todo") | F.data.startswith("ask:risks") | F.data.startswith("ask:relnotes"))
 async def ask_templates(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
     kind = cb.data.split(":")[1]
@@ -392,8 +377,8 @@ async def ask_templates(cb: CallbackQuery):
         except:
             pass
         async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer("✅ Шаблон выбран (LLM отключён)", reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer("✅ Шаблон выбран (LLM отключён)")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 # --- Quiet / Scope / Sources ---
@@ -401,7 +386,6 @@ async def ask_templates(cb: CallbackQuery):
 async def quiet_toggle(cb: CallbackQuery):
     from app.db import session_scope
     from app.services.memory import get_chat_flags, set_quiet_mode
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
     async with session_scope() as st:
         _, quiet_on, _, _ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
         newv = await set_quiet_mode(st, cb.from_user.id if cb.from_user else 0, on=not quiet_on)
@@ -412,14 +396,14 @@ async def quiet_toggle(cb: CallbackQuery):
             except:
                 pass
             chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer(f"Quiet mode: {'ON' if newv else 'OFF'}", reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer(f"Quiet mode: {'ON' if newv else 'OFF'}")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 @router.callback_query(F.data == "chat:toggle")
 async def chat_toggle_cb(cb: CallbackQuery):
     from app.db import session_scope
     from app.services.memory import get_chat_flags, set_chat_mode
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
     async with session_scope() as st:
         chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
         new_on = not chat_on
@@ -450,7 +434,6 @@ async def sources_set(cb: CallbackQuery):
         return await cb.answer("Invalid data")
     _, _, val = cb.data.split(":")
     from app.db import session_scope
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
     from app.services.memory import get_chat_flags
     async with session_scope() as st:
         stt = await _ensure_user_state(st, cb.from_user.id if cb.from_user else 0)
@@ -462,7 +445,8 @@ async def sources_set(cb: CallbackQuery):
             except:
                 pass
             chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer(f"Sources: {val}", reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer(f"Sources: {val}")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 # Новые обработчики для Scope
@@ -489,7 +473,6 @@ async def scope_set(cb: CallbackQuery):
         return await cb.answer("Invalid data")
     _, _, val = cb.data.split(":")
     from app.db import session_scope
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
     from app.services.memory import get_chat_flags
     async with session_scope() as st:
         stt = await _ensure_user_state(st, cb.from_user.id if cb.from_user else 0)
@@ -501,7 +484,8 @@ async def scope_set(cb: CallbackQuery):
             except:
                 pass
             chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer(f"Scope: {val}", reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer(f"Scope: {val}")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 # --- Projects list / link/unlink / activate ---
@@ -535,7 +519,6 @@ async def projects_list(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("projects:link:"))
 async def projects_link(cb: CallbackQuery):
     from app.db import session_scope
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
     from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
@@ -553,13 +536,13 @@ async def projects_link(cb: CallbackQuery):
             await cb.message.edit_reply_markup(reply_markup=kb)
         except:
             pass
-        await cb.message.answer("✅ Проект добавлен/удален из связанных", reply_markup=build_reply_kb(chat_on))
+        await cb.message.answer("✅ Проект добавлен/удален из связанных")
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer("Готово")
 
 @router.callback_query(F.data.startswith("projects:activate:"))
 async def projects_activate(cb: CallbackQuery):
     from app.db import session_scope
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
     from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
@@ -578,15 +561,14 @@ async def projects_activate(cb: CallbackQuery):
                     await cb.message.edit_reply_markup(reply_markup=kb)
                 except:
                     pass
-                await cb.message.answer(f"✅ Active: <b>{escape(p.name)}</b>", reply_markup=build_reply_kb(chat_on))
+                await cb.message.answer(f"✅ Active: <b>{escape(p.name)}</b>")
+                await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 from aiogram.types import ForceReply
 
 @router.callback_query(F.data == "projects:new")
 async def projects_new(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     from app.db import session_scope
     if cb.message and isinstance(cb.message, Message):
         async with session_scope() as st:
@@ -596,17 +578,19 @@ async def projects_new(cb: CallbackQuery):
 @router.message(F.reply_to_message & F.reply_to_message.text.startswith("Название нового проекта:"))
 async def projects_create(message: Message):
     from app.db import session_scope
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
     from app.services.memory import get_chat_flags
     async with session_scope() as st:
         name = (message.text or "").strip()
         if not name:
             chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-            return await message.answer("Пустое имя. Попробуй ещё раз.", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Пустое имя. Попробуй ещё раз.")
+            await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+            return
         p = Project(name=name)
         st.add(p)
         await st.flush()
         await set_active_project(st, message.from_user.id if message.from_user else 0, p)
         await st.commit()
         chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-        await message.answer(f"Проект создан и активирован: <b>{escape(name)}</b>", reply_markup=build_reply_kb(chat_on))
+        await message.answer(f"Проект создан и активирован: <b>{escape(name)}</b>")
+        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)

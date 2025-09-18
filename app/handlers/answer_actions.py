@@ -11,6 +11,7 @@ import asyncio
 from typing import cast
 import sqlalchemy as sa
 from html import escape
+from app.services.ui_helpers import show_answer_with_bar, restore_answer_with_bar, attach_reply_kb as svc_attach_reply_kb
 # Import the new tags service
 from app.services.tags import get_presets
 
@@ -61,8 +62,6 @@ def build_tag_kb(tags: list[str], msg_id: int):
 
 @router.callback_query(F.data.startswith("ans:save:"))
 async def ans_save(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
         
@@ -88,12 +87,12 @@ async def ans_save(cb: CallbackQuery):
                 projects = await list_all_projects(st)
                 if not projects:
                     if cb.message and isinstance(cb.message, Message):
-                        # Get chat_on flag to rebuild keyboard with correct state
-                        chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-                        return await cb.message.answer("Сначала создай проект: Actions → Projects → ➕ New", reply_markup=build_reply_kb(chat_on))
+                        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
+                        return
                 kb = _project_pick_kb(msg_id, "save", projects)
                 if cb.message and isinstance(cb.message, Message):
                     await cb.message.answer("Выбери проект для сохранения:", reply_markup=kb)
+                    await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
                 return await cb.answer()
 
         text = ""
@@ -115,8 +114,6 @@ async def ans_save(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("ans:sum:"))
 async def ans_summary(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
         
@@ -144,12 +141,11 @@ async def ans_summary(cb: CallbackQuery):
                 projects = await list_all_projects(st)
                 if not projects:
                     if cb.message and isinstance(cb.message, Message):
-                        # Get chat_on flag to rebuild keyboard with correct state
-                        chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-                        return await cb.message.answer("Сначала создай проект: Actions → Projects → ➕ New", reply_markup=build_reply_kb(chat_on))
+                        return await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
                 kb = _project_pick_kb(msg_id, "sum", projects)
                 if cb.message and isinstance(cb.message, Message):
                     await cb.message.answer("Выбери проект для 📌 Summary:", reply_markup=kb)
+                    await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
                 return await cb.answer()
 
         # если не сохранён base — создаём
@@ -170,10 +166,7 @@ async def ans_summary(cb: CallbackQuery):
         await st.commit()
 
     if cb.message and isinstance(cb.message, Message):
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer("📌 Суммаризация сохранена и закреплена.", reply_markup=build_reply_kb(chat_on))
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 
@@ -212,8 +205,6 @@ async def ans_pickproj(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("ans:del:"))
 async def ans_del(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     # удаляем СВОЁ сообщение
     try:
         if cb.message and isinstance(cb.message, Message):
@@ -223,10 +214,7 @@ async def ans_del(cb: CallbackQuery):
     # аккуратная плашка (самоудалится)
     note = None
     if cb.message and isinstance(cb.message, Message):
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            note = await cb.message.answer("🧹 Очищено", reply_markup=build_reply_kb(chat_on))
+        note = await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     if note:
         await asyncio.sleep(3)
         try:
@@ -240,8 +228,6 @@ async def ans_del(cb: CallbackQuery):
 # Заменяем старый обработчик на новый с пресетами
 @router.callback_query(F.data.startswith("ans:tag:"))
 async def ans_tag(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
     msg_id = int(cb.data.split(":")[-1])
@@ -250,12 +236,11 @@ async def ans_tag(cb: CallbackQuery):
         bm = (await st.execute(sa.select(BotMessage).where(BotMessage.tg_message_id==msg_id))).scalars().first()
         pid = bm.project_id if bm else None
         presets = await get_presets(st, cb.from_user.id if cb.from_user else 0, pid)
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
     TAG_CACHE[msg_id] = set()
     if cb.message and isinstance(cb.message, Message):
         await cb.message.answer("Выбери теги (тап по кнопкам), потом нажми «Готово».",
                                 reply_markup=build_tag_kb(presets, msg_id))
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 
@@ -274,8 +259,6 @@ async def ans_tag_toggle(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("ans:tagdone:"))
 async def ans_tag_done(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
     msg_id = int(cb.data.split(":")[-1])
@@ -293,17 +276,17 @@ async def ans_tag_done(cb: CallbackQuery):
         if not bm.saved or not bm.artifact_id:
             if not target_pid:
                 if cb.message and isinstance(cb.message, Message):
-                    # Get chat_on flag to rebuild keyboard with correct state
-                    chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-                    return await cb.message.answer("Сначала выбери проект в Actions → Projects.", reply_markup=build_reply_kb(chat_on))
+                    await cb.message.answer("Сначала выбери проект в Actions → Projects.")
+                    await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
+                    return
                 proj = await get_active_project(st, cb.from_user.id if cb.from_user else 0)
                 if proj:
                     target_pid = proj.id
                 else:
                     if cb.message and isinstance(cb.message, Message):
-                        # Get chat_on flag to rebuild keyboard with correct state
-                        chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-                        return await cb.message.answer("Сначала выбери проект в Actions → Projects.", reply_markup=build_reply_kb(chat_on))
+                        await cb.message.answer("Сначала выбери проект в Actions → Projects.")
+                        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
+                        return
             base = Artifact(project_id=target_pid, kind="answer", title="Chat answer", raw_text=text, pinned=False)
             st.add(base)
             await st.flush()
@@ -332,64 +315,55 @@ async def ans_tag_done(cb: CallbackQuery):
         if insert_data:
             await st.execute(sa.insert(artifact_tags).values(insert_data))
         await st.commit()
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
     if cb.message and isinstance(cb.message, Message):
-        await cb.message.answer(f"🏷 Теги: {escape(', '.join(tags))}", reply_markup=build_reply_kb(chat_on))
+        await cb.message.answer(f"🏷 Теги: {escape(', '.join(tags))}")
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     TAG_CACHE.pop(msg_id, None)
     await cb.answer()
 
 
 @router.callback_query(F.data.startswith("ans:tagfree:"))
 async def ans_tag_free(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
     msg_id = int(cb.data.split(":")[-1])
     if cb.message and isinstance(cb.message, Message):
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer(GENERAL_TAG_PROMPT, reply_markup=ForceReply(selective=True))
+        await cb.message.answer(GENERAL_TAG_PROMPT, reply_markup=ForceReply(selective=True))
     await cb.answer()
 
 
 # общий фри-ввод тегов для ОТВЕТА (не импорта!)
 @router.message(F.reply_to_message & (F.reply_to_message.text == GENERAL_TAG_PROMPT))
 async def tags_free_reply(message: Message):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     tags = [t.strip() for t in (message.text or "").split(",") if t.strip()]
-    if not tags: 
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-        return await message.answer("Пусто.", reply_markup=build_reply_kb(chat_on))
+    if not tags:
+        await message.answer("Пусто.")
+        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+        return
     # Применим к последнему BotMessage пользователя, аналогично предыдущему коду
     async with session_scope() as st:
         bm = (await st.execute(sa.select(BotMessage).where(BotMessage.user_id==(message.from_user.id if message.from_user else 0))
               .order_by(BotMessage.created_at.desc()).limit(1))).scalars().first()
-        if not bm: 
-            # Get chat_on flag to rebuild keyboard with correct state
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-            return await message.answer("Не нашёл сообщение для тегов.", reply_markup=build_reply_kb(chat_on))
+        if not bm:
+            await message.answer("Не нашёл сообщение для тегов.")
+            await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+            return
         text = message.reply_to_message and (message.reply_to_message.text or "") or ""
         if message.reply_to_message and message.reply_to_message.caption:
             text = message.reply_to_message.caption
         target_pid = bm.project_id
         if not bm.saved or not bm.artifact_id:
-            if not target_pid: 
-                # Get chat_on flag to rebuild keyboard with correct state
-                chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-                return await message.answer("Сначала выбери проект.", reply_markup=build_reply_kb(chat_on))
+            if not target_pid:
+                await message.answer("Сначала выбери проект.")
+                await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+                return
             proj = await get_active_project(st, message.from_user.id if message.from_user else 0)
             if proj:
                 target_pid = proj.id
             else:
-                # Get chat_on flag to rebuild keyboard with correct state
-                chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-                return await message.answer("Сначала выбери проект.", reply_markup=build_reply_kb(chat_on))
+                await message.answer("Сначала выбери проект.")
+                await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+                return
             base = Artifact(project_id=target_pid, kind="answer", title="Chat answer", raw_text=text, pinned=False)
             st.add(base)
             await st.flush()
@@ -418,10 +392,9 @@ async def tags_free_reply(message: Message):
         if insert_data:
             await st.execute(sa.insert(artifact_tags).values(insert_data))
         await st.commit()
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
         response_text = f"🏷 Теги: {escape(', '.join(tags))}"
-    await message.answer(response_text, reply_markup=build_reply_kb(chat_on))
+    await message.answer(response_text)
+    await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
 
 
 @router.callback_query(F.data.startswith("imp:tag:"))
@@ -449,6 +422,7 @@ async def imp_tag(cb: CallbackQuery):
     if cb.message and isinstance(cb.message, Message):
         await cb.message.answer("Выбери теги (тап по кнопкам), потом «Готово».",
                                 reply_markup=build_imp_tag_kb(presets, art_id))  # reuse разметки — msg_id нам не важен
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 # Добавим отдельные колбэки для импорта:
@@ -470,8 +444,6 @@ async def imp_tag_toggle(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("imp:tagdone:"))
 async def imp_tag_done(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
     art_id = int(cb.data.split(":")[-1])
@@ -502,26 +474,20 @@ async def imp_tag_done(cb: CallbackQuery):
         if insert_data:
             await st.execute(sa.insert(artifact_tags).values(insert_data))
         await st.commit()
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
     if cb.message and isinstance(cb.message, Message):
-        await cb.message.answer(f"🏷 Теги для импорта: {escape(', '.join(tags))}", reply_markup=build_reply_kb(chat_on))
+        await cb.message.answer(f"🏷 Теги для импорта: {escape(', '.join(tags))}")
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     IMP_TAG_CACHE.pop(art_id, None)
     await cb.answer()
 
 
 @router.callback_query(F.data.startswith("imp:tagfree:"))
 async def imp_tag_free(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
     art_id = int(cb.data.split(":")[-1])
     if cb.message and isinstance(cb.message, Message):
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-            await cb.message.answer(f"{IMPORT_TAG_PROMPT_PREFIX}{art_id} (через запятую):", reply_markup=ForceReply(selective=True))
+        await cb.message.answer(f"{IMPORT_TAG_PROMPT_PREFIX}{art_id} (через запятую):", reply_markup=ForceReply(selective=True))
     await cb.answer()
 
 # фри-ввод тегов для ИМПОРТА (по artifact_id)
@@ -529,8 +495,6 @@ async def imp_tag_free(cb: CallbackQuery):
     F.reply_to_message & F.reply_to_message.text.regexp(r"^Свои теги для импорта #\d+")
 )
 async def imp_tags_free_reply(message: Message):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     import re
     if not message.reply_to_message or not message.reply_to_message.text:
         return
@@ -538,11 +502,10 @@ async def imp_tags_free_reply(message: Message):
     if not m: return
     art_id = int(m.group(1))
     tags = [t.strip() for t in (message.text or "").split(",") if t.strip()]
-    if not tags: 
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-        return await message.answer("Пусто.", reply_markup=build_reply_kb(chat_on))
+    if not tags:
+        await message.answer("Пусто.")
+        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+        return
     async with session_scope() as st:
         await st.execute(sa.delete(artifact_tags).where(artifact_tags.c.artifact_id == art_id))
         # Create tag objects first to ensure they exist in the tags table
@@ -566,25 +529,21 @@ async def imp_tags_free_reply(message: Message):
         if insert_data:
             await st.execute(sa.insert(artifact_tags).values(insert_data))
         await st.commit()
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-    await message.answer(f"🏷 Теги для импорта: {escape(', '.join(tags))}", reply_markup=build_reply_kb(chat_on))
+    await message.answer(f"🏷 Теги для импорта: {escape(', '.join(tags))}")
+    await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
 
 
 @router.callback_query(F.data.startswith("imp:del:"))
 async def imp_del(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
     art_id = int(cb.data.split(":")[-1])
     async with session_scope() as st:
         await st.execute(sa.delete(Artifact).where(Artifact.id == art_id))
         await st.commit()
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
     if cb.message and isinstance(cb.message, Message):
-        await cb.message.answer(f"🗑 Импорт #{art_id} удалён", reply_markup=build_reply_kb(chat_on))
+        await cb.message.answer(f"🗑 Импорт #{art_id} удалён")
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 
@@ -605,7 +564,6 @@ def build_imp_tag_kb(tags: list[str], art_id: int):
 
 @router.callback_query(F.data.startswith("ans:refine:"))
 async def ans_refine(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
     if not cb.data:
         return await cb.answer("Invalid data")
     msg_id = int(cb.data.split(":")[-1])
@@ -619,7 +577,6 @@ async def ans_refine(cb: CallbackQuery):
 # Handle the refinement reply
 @router.message(F.reply_to_message & F.reply_to_message.text.regexp(r"^Чем уточнить\?"))
 async def refine_reply(message: Message):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
     from app.services.memory import get_active_project, gather_context
     from app.llm import ask_llm
     from app.config import settings
@@ -636,13 +593,15 @@ async def refine_reply(message: Message):
         bm = result.scalar_one_or_none()
         
         if not bm:
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-            return await message.answer("Не найдено сообщение для уточнения.", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Не найдено сообщение для уточнения.")
+            await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+            return
             
         proj = await get_active_project(st, message.from_user.id if message.from_user else 0)
         if not proj:
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-            return await message.answer("Сначала выберите проект: <code>/project &lt;name&gt;</code>", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Сначала выберите проект: <code>/project <name></code>")
+            await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+            return
             
         # Get context - if we have selected artifacts, use them, otherwise use default context
         stt = await _ensure_user_state(st, message.from_user.id if message.from_user else 0)
@@ -657,9 +616,9 @@ async def refine_reply(message: Message):
             
         model = await get_preferred_model(st, message.from_user.id if message.from_user else 0)
         answer = await ask_llm(message.text, chunks, model=model)
-        
-        chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-        sent_msg = await message.answer(answer, reply_markup=build_reply_kb(chat_on))
+
+        sent_msg = await message.answer(answer)
+        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
         
         # Save the answer to BotMessage for future actions
         new_bm = BotMessage(

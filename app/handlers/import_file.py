@@ -20,6 +20,7 @@ from app.storage import save_file
 from app.db import session_scope
 from app.ignore import load_pmignore, iter_text_files
 from app.models import Tag, artifact_tags
+from app.services.ui_helpers import attach_reply_kb as svc_attach_reply_kb
 
 # Add Berlin timezone
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -88,13 +89,11 @@ def _parse_tags(cmd_text: str | None) -> list[str] | None:
 @router.message(F.document)
 async def on_document(message: Message):
     """Ловим любой документ и запоминаем его как 'последний' для юзера в этом чате."""
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     doc = message.document
     if not doc or not message.from_user:
         return
     _LAST_DOC[(message.chat.id, message.from_user.id)] = (doc.file_id, doc.file_name or "file")
-    
+
     # Save to database as well
     async with session_scope() as st:
         stt = await _ensure_user_state(st, message.from_user.id)
@@ -102,30 +101,27 @@ async def on_document(message: Message):
         stt.last_doc_name = doc.file_name or "file"
         stt.last_doc_mime = doc.mime_type or ""
         await st.commit()
-        
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
+
         # For ZIP files, provide special instructions
         if doc.file_name and doc.file_name.lower().endswith(".zip"):
             await message.answer("Получил ZIP-архив. Теперь ответьте на него командой /import, "
-                                 "или нажмите в Actions: «Импорт (последний файл)».", reply_markup=build_reply_kb(chat_on))
+                                 "или нажмите в Actions: «Импорт (последний файл)».")
+            await svc_attach_reply_kb(message, message.from_user.id)
         else:
             await message.answer("Получил документ. Теперь ответьте на него командой /import, "
-                                 "или нажмите в Actions: «Импорт (последний файл)».", reply_markup=build_reply_kb(chat_on))
+                                 "или нажмите в Actions: «Импорт (последний файл)».")
+            await svc_attach_reply_kb(message, message.from_user.id)
 
 @router.message(Command("import"))
 async def import_document(message: Message):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not message.from_user:
         return
-        
+
     async with session_scope() as st:
         proj = await get_active_project(st, message.from_user.id)
         if not proj:
-            # Get chat_on flag to rebuild keyboard with correct state
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-            await message.answer("Сначала выберите проект: <code>/project &lt;name&gt;</code>", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Сначала выберите проект: <code>/project <name></code>")
+            await svc_attach_reply_kb(message, message.from_user.id)
             return
 
         # 1) Пытаемся взять документ из reply
@@ -142,28 +138,24 @@ async def import_document(message: Message):
                 # подтягиваем объект файла через get_file, чтобы скачать
                 # В aiogram для скачивания нужен FilePath -> берем через bot.get_file(file_id)
                 if not message.bot:
-                    # Get chat_on flag to rebuild keyboard with correct state
-                    chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-                    await message.answer("Ошибка доступа к боту", reply_markup=build_reply_kb(chat_on))
+                    await message.answer("Ошибка доступа к боту")
+                    await svc_attach_reply_kb(message, message.from_user.id)
                     return
                 tg_file = await message.bot.get_file(file_id)
                 if not tg_file.file_path:
-                    # Get chat_on flag to rebuild keyboard with correct state
-                    chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-                    await message.answer("Не удалось получить путь к файлу", reply_markup=build_reply_kb(chat_on))
+                    await message.answer("Не удалось получить путь к файлу")
+                    await svc_attach_reply_kb(message, message.from_user.id)
                     return
                 file_bytes_io = await message.bot.download_file(tg_file.file_path)
                 if not file_bytes_io:
-                    # Get chat_on flag to rebuild keyboard with correct state
-                    chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-                    await message.answer("Не удалось скачать файл", reply_markup=build_reply_kb(chat_on))
+                    await message.answer("Не удалось скачать файл")
+                    await svc_attach_reply_kb(message, message.from_user.id)
                     return
                 data = file_bytes_io.read()
                 ext = Path(file_name).suffix.lower()
                 if ext not in ALLOWED_EXTS:
-                    # Get chat_on flag to rebuild keyboard with correct state
-                    chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-                    await message.answer("Файл найден, но расширение не поддерживается. Доступно: .txt .md .json .zip", reply_markup=build_reply_kb(chat_on))
+                    await message.answer("Файл найден, но расширение не поддерживается. Доступно: .txt .md .json .zip")
+                    await svc_attach_reply_kb(message, message.from_user.id)
                     return
                 uri = await save_file(file_name, data)  # MinIO (может вернуть None, если не настроен)
                 text = data.decode("utf-8", errors="ignore")
@@ -204,8 +196,6 @@ async def import_document(message: Message):
                 builder.button(text="🔎 Ask this", callback_data=f"imp:ask:{art.id}")
                 builder.adjust(2)
                 
-                # Get chat_on flag to rebuild keyboard with correct state
-                chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
                 await message.answer(
                     "\n".join(lines),
                     reply_markup=builder.as_markup()
@@ -213,38 +203,33 @@ async def import_document(message: Message):
                 return
 
             # Вообще ничего не нашли
-            # Get chat_on flag to rebuild keyboard with correct state
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-            await message.answer("Пришлите файл .txt/.md/.json/.zip и ответьте на него командой /import для импорта.", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Пришлите файл .txt/.md/.json/.zip и ответьте на него командой /import для импорта.")
+            await svc_attach_reply_kb(message, message.from_user.id)
             return
 
         # 3) Ветка с reply (основной happy-path)
         file_name = doc.file_name or "import.txt"
         ext = Path(file_name).suffix.lower()
         if ext not in ALLOWED_EXTS:
-            # Get chat_on flag to rebuild keyboard with correct state
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-            await message.answer("Файл получен, но расширение не поддерживается. Доступно: .txt .md .json .zip", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Файл получен, но расширение не поддерживается. Доступно: .txt .md .json .zip")
+            await svc_attach_reply_kb(message, message.from_user.id)
             return
 
         if not message.bot:
-            # Get chat_on flag to rebuild keyboard with correct state
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-            await message.answer("Ошибка доступа к боту", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Ошибка доступа к боту")
+            await svc_attach_reply_kb(message, message.from_user.id)
             return
             
         tg_file = await message.bot.get_file(doc.file_id)
         if not tg_file.file_path:
-            # Get chat_on flag to rebuild keyboard with correct state
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-            await message.answer("Не удалось получить путь к файлу", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Не удалось получить путь к файлу")
+            await svc_attach_reply_kb(message, message.from_user.id)
             return
             
         file_bytes_io = await message.bot.download_file(tg_file.file_path)
         if not file_bytes_io:
-            # Get chat_on flag с correct state
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-            await message.answer("Не удалось скачать файл", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Не удалось скачать файл")
+            await svc_attach_reply_kb(message, message.from_user.id)
             return
             
         data = file_bytes_io.read()
@@ -286,8 +271,6 @@ async def import_document(message: Message):
         builder.button(text="🔎 Ask this", callback_data=f"imp:ask:{art.id}")
         builder.adjust(2)
         
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
         await message.answer(
             "\n".join(lines),
             reply_markup=builder.as_markup()
@@ -296,21 +279,17 @@ async def import_document(message: Message):
 # --- ZIP import ---
 @router.message(Command("importzip"))
 async def import_zip(message: Message):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     # Проверяем, что есть reply с документом
     if not message.reply_to_message or not message.reply_to_message.document:
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-        return await message.answer("Прикрепите ZIP как файл и ответьте на сообщение с командой:\n<code>/importzip tags code,snapshot,rev-YYYY-MM-DD</code>", reply_markup=build_reply_kb(chat_on))
+        await message.answer("Прикрепите ZIP как файл и ответьте на сообщение с командой:\n<code>/importzip tags code,snapshot,rev-YYYY-MM-DD</code>")
+        await svc_attach_reply_kb(message, message.from_user.id)
+        return
     
     doc = message.reply_to_message.document
     if not doc.file_name or not doc.file_name.endswith(".zip"):
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-        return await message.answer("Файл должен быть быть .zip", reply_markup=build_reply_kb(chat_on))
+        await message.answer("Файл должен быть быть .zip")
+        await svc_attach_reply_kb(message, message.from_user.id)
+        return
     
     # Получаем теги из команды
     tags = _parse_tags(message.text)
@@ -336,24 +315,21 @@ async def import_zip(message: Message):
     
     # Скачиваем ZIP
     if not message.bot:
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-        return await message.answer("Ошибка доступа к боту", reply_markup=build_reply_kb(chat_on))
+        await message.answer("Ошибка доступа к боту")
+        await svc_attach_reply_kb(message, message.from_user.id)
+        return
         
     tg_file = await message.bot.get_file(doc.file_id)
     if not tg_file.file_path:
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-        return await message.answer("Не удалось получить путь к файлу", reply_markup=build_reply_kb(chat_on))
+        await message.answer("Не удалось получить путь к файлу")
+        await svc_attach_reply_kb(message, message.from_user.id)
+        return
         
     file_bytes_io = await message.bot.download_file(tg_file.file_path)
     if not file_bytes_io:
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-        return await message.answer("Не удалось скачать файл", reply_markup=build_reply_kb(chat_on))
+        await message.answer("Не удалось скачать файл")
+        await svc_attach_reply_kb(message, message.from_user.id)
+        return
         
     data = file_bytes_io.read()
     
@@ -399,6 +375,7 @@ async def import_zip(message: Message):
         await st.commit()
     
     await message.answer(f"Импорт ZIP завершён: {imported} файлов.\nТег: <code>{escape(batch_tag)}</code>")
+    await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
 
 # --- экспортируем для меню ---
 async def import_last_for_user(message: Message, st: AsyncSession, tags: list[str] | None) -> bool:
@@ -411,24 +388,29 @@ async def import_last_for_user(message: Message, st: AsyncSession, tags: list[st
     file_id, file_name = last
     if not message.bot:
         await message.answer("Ошибка доступа к боту")
+        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
         return True
     tg_file = await message.bot.get_file(file_id)
     if not tg_file.file_path:
         await message.answer("Не удалось получить путь к файлу")
+        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
         return True
     file_bytes_io = await message.bot.download_file(tg_file.file_path)
     if not file_bytes_io:
         await message.answer("Не удалось скачать файл")
+        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
         return True
     data = file_bytes_io.read()
     ext = Path(file_name).suffix.lower()
     if ext not in ALLOWED_EXTS:
         await message.answer("Файл найден, но расширение не поддерживается. Доступно: .txt .md .json .zip")
+        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
         return True
-        
+
     proj = await get_active_project(st, message.from_user.id)
     if not proj:
-        await message.answer("Сначала выберите проект: <code>/project &lt;name&gt;</code>")
+        await message.answer("Сначала выберите проект: <code>/project <name></code>")
+        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
         return True
         
     # Generate batch tag for single file import
@@ -511,10 +493,12 @@ async def import_last_for_user(message: Message, st: AsyncSession, tags: list[st
                 
                 await st.commit()
                 await message.answer(f"Импортировано из ZIP в <b>{escape(proj.name)}</b>: {imported_count} файлов\nАрхив: {escape(file_name)}\nТеги: {', '.join(tags) if tags else '—'}")
+                await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
                 return True
-                
+
         except Exception as e:
             await message.answer(f"Ошибка при импорте ZIP: {escape(str(e))}")
+            await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
             return True
     else:
         # Handle regular text files

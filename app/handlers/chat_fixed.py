@@ -10,6 +10,7 @@ from app.services.memory import (
 )
 from app.models import BotMessage
 from app.llm import ask_llm
+from app.services.ui_helpers import attach_reply_kb as svc_attach_reply_kb
 from html import escape
 
 router = Router()
@@ -72,11 +73,15 @@ async def on_free_text(message: Message):
             return
         if not chat_on:
             # один мягкий хинт можно запоминать в памяти, но для MVP просто ответим
-            return await message.answer("💡 Включи чат: нажми «💬 Chat» на синей клавиатуре или команду /actions → Quiet OFF.")
+            await message.answer("💡 Включи чат: нажми «💬 Chat» на синей клавиатуре или команду /actions → Quiet OFF.")
+            await svc_attach_reply_kb(message, message.from_user.id)
+            return
         
         proj = await get_active_project(st, message.from_user.id)
         if not proj:
-            return await message.answer("Сначала выбери проект: открой Actions → Projects (или /project <name>).")
+            await message.answer("Сначала выбери проект: открой Actions → Projects (или /project <name>).")
+            await svc_attach_reply_kb(message, message.from_user.id)
+            return
         
         # Сбор контекста по источникам (упрощённая версия)
         ctx_texts = await gather_context_sources(
@@ -120,7 +125,9 @@ async def run_question_with_selection(message: Message, st: AsyncSession, stt, t
     
     proj = await get_active_project(st, message.from_user.id)
     if not proj:
-        return await message.answer("Сначала выбери проект: открой Actions → Projects (или /project <name>).")
+        await message.answer("Сначала выбери проект: открой Actions → Projects (или /project <name>).")
+        await svc_attach_reply_kb(message, message.from_user.id)
+        return
     
     model = await get_preferred_model(st, message.from_user.id)
     project_id = proj.id  # This is safe because we've already checked that proj is not None

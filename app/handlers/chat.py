@@ -4,8 +4,9 @@ from aiogram.types import Message
 
 from app.db import session_scope
 from app.services.memory import _ensure_user_state, get_chat_flags
-from app.handlers.keyboard import SERVICE_TEXTS, main_reply_kb
+from app.handlers.keyboard import SERVICE_TEXTS
 from app.handlers.ask import run_question_with_selection
+from app.services.ui_helpers import attach_reply_kb as svc_attach_reply_kb
 
 router = Router(name="chat")
 
@@ -36,9 +37,9 @@ async def on_free_text(message: Message):
         if bool(stt.ask_armed):
             if not chat_on:
                 await message.answer(
-                    "Чат выключен. Нажми ‘💬 Chat: ON’ и отправь вопрос — ASK уже готов.",
-                    reply_markup=main_reply_kb(False)
+                    "Чат выключен. Нажми ‘💬 Chat: ON’ и отправь вопрос — ASK уже готов."
                 )
+                await svc_attach_reply_kb(message, message.from_user.id)
                 return
             # IMPORTANT: no LLM call in test mode
             return await run_question_with_selection(message, text)
@@ -49,7 +50,7 @@ async def on_free_text(message: Message):
             return
         else:
             await message.answer(
-                "Чат выключен. Нажми ‘💬 Chat: ON’ чтобы задать вопрос (LLM сейчас отключён).",
-                reply_markup=main_reply_kb(False)
+                "Чат выключен. Нажми ‘💬 Chat: ON’ чтобы задать вопрос (LLM сейчас отключён)."
             )
+            await svc_attach_reply_kb(message, message.from_user.id)
             return

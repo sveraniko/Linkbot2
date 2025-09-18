@@ -4,6 +4,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from app.db import session_scope
 from app.repo import repo_add, repo_list, repo_sync, repo_remove
 from app.config import settings
+from app.services.ui_helpers import attach_reply_kb as svc_attach_reply_kb
 
 router = Router()
 
@@ -17,6 +18,7 @@ def repo_menu_kb():
 async def repo_open(cb: CallbackQuery):
     if cb.message and isinstance(cb.message, Message):
         await cb.message.answer("Repo:", reply_markup=repo_menu_kb())
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 @router.callback_query(F.data == "repo:add")
@@ -30,13 +32,16 @@ async def repo_add_start(cb: CallbackQuery):
 async def repo_add_reply(message: Message):
     parts = (message.text or "").splitlines()[-1].split()
     if len(parts) < 2:
-        return await message.answer("Нужно: <alias> <url> [branch]")
+        await message.answer("Нужно: <alias> <url> [branch]")
+        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+        return
     alias, url, *rest = parts
     branch = rest[0] if rest else "main"
     async with session_scope() as st:
         await repo_add(st, message.from_user.id if message.from_user else 0, alias, url, branch)
         await st.commit()
     await message.answer(f"Репозиторий добавлен: {alias} ({branch})")
+    await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
 
 @router.callback_query(F.data == "repo:list")
 async def repo_list_open(cb: CallbackQuery):
@@ -44,7 +49,9 @@ async def repo_list_open(cb: CallbackQuery):
         items = await repo_list(st, cb.from_user.id if cb.from_user else 0)
     if not items:
         if cb.message and isinstance(cb.message, Message):
-            return await cb.message.answer("Список пуст. Нажми ➕ Add.")
+            await cb.message.answer("Список пуст. Нажми ➕ Add.")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
+            return
     rows = []
     for r in items:
         rows.append([
@@ -54,12 +61,11 @@ async def repo_list_open(cb: CallbackQuery):
         ])
     if cb.message and isinstance(cb.message, Message):
         await cb.message.answer("Репозитории:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 @router.callback_query(F.data.startswith("repo:sync:"))
 async def repo_sync_cb(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
     alias = cb.data.split(":")[-1]
@@ -67,24 +73,20 @@ async def repo_sync_cb(cb: CallbackQuery):
     async with session_scope() as st:
         out = await repo_sync(st, cb.from_user.id if cb.from_user else 0, alias, token=token)
         await st.commit()
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
     if cb.message and isinstance(cb.message, Message):
-        await cb.message.answer(f"<code>{out[:3500]}</code>", reply_markup=build_reply_kb(chat_on))
+        await cb.message.answer(f"<code>{out[:3500]}</code>")
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 @router.callback_query(F.data.startswith("repo:rm:"))
 async def repo_rm_cb(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
     alias = cb.data.split(":")[-1]
     async with session_scope() as st:
         await repo_remove(st, cb.from_user.id if cb.from_user else 0, alias)
         await st.commit()
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
     if cb.message and isinstance(cb.message, Message):
-        await cb.message.answer(f"Удалён: {alias}", reply_markup=build_reply_kb(chat_on))
+        await cb.message.answer(f"Удалён: {alias}")
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()

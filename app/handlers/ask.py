@@ -21,7 +21,6 @@ import asyncio  # Add this import for asyncio handling
 from app.db import session_scope
 from app.models import Artifact, Chunk, UserState, Tag, artifact_tags
 from app.services.memory import _ensure_user_state, get_active_project, get_chat_flags, get_linked_project_ids, set_chat_mode
-from app.handlers.keyboard import main_reply_kb
 from app.handlers.import_file import _LAST_DOC
 from app.services.artifacts import create_import
 from app.config import settings
@@ -29,44 +28,21 @@ from app.storage import save_file
 from app.ignore import load_pmignore, iter_text_files
 from app.utils.zipfix import fix_zip_name, decode_text_bytes
 from app.utils.tg import _toast, _safe_delete, _send_ephemeral  # Add this import
-from app.services.telemetry import event, error
+from app.utils.callback import safe_callback_data, check_callback_size
+from app.utils.unicode_utils import normalize_user_input, normalize_search_term
 from app.services.telemetry import event, error
 # Service-layer imports
 from app.services.llm_pipeline import run_llm_pipeline as svc_run_llm
 from app.services.ask_list import list_sources as svc_list_sources
 from app.services.ask_answer import compute_cost as svc_compute_cost, build_context_line as svc_build_ctx_line, build_sources_short as svc_build_sources_short
 from app.services.ask_selection import toggle_selection as svc_toggle_selection, clear_selection as svc_clear_selection, set_autoclear as svc_set_autoclear, get_selection as svc_get_selection
-from app.services.telemetry import event, error
+from app.services.ui_helpers import show_answer_with_bar, restore_answer_with_bar, attach_reply_kb as svc_attach_reply_kb
 
 # Add Berlin timezone
 BERLIN = ZoneInfo("Europe/Berlin")
 
 router = Router(name="ask")
 
-# ---- Generic helpers (iteration 3): reply keyboard + idempotent locks ----
-async def _attach_reply_kb(message: Message, user_id: int):
-    async with session_scope() as st:
-        chat_on, *_ = await get_chat_flags(st, user_id)
-        await message.answer("", reply_markup=main_reply_kb(chat_on))
-
-async def _restore_bar_only(cb: CallbackQuery, run_id: str):
-    async with session_scope() as st:
-        stt = await _ensure_user_state(st, cb.from_user.id)
-        import json
-        try:
-            la = json.loads(stt.last_answer) if stt.last_answer else {}
-        except Exception:
-            la = {}
-        saved = la.get("saved", False)
-        pinned = la.get("pinned", False)
-        artifact_id = la.get("artifact_id")
-        kb = answer_actions_kb(run_id, saved=saved, pinned=pinned, artifact_id=artifact_id)
-        if cb.message and isinstance(cb.message, Message):
-            try:
-                await cb.message.edit_reply_markup(reply_markup=kb)
-            except Exception:
-                pass
-            await _attach_reply_kb(cb.message, cb.from_user.id)
 
 async def _debounce_action(user_id: int, run_id: str, key: str, window_ms: int = 1500) -> bool:
     """Return True if action should be debounced (skip now)."""
@@ -90,31 +66,6 @@ async def _debounce_action(user_id: int, run_id: str, key: str, window_ms: int =
         await st.commit()
         return False
 
-# Helper: attach reply keyboard consistently
-async def _attach_reply_kb(message: Message, user_id: int):
-    async with session_scope() as st:
-        chat_on, *_ = await get_chat_flags(st, user_id)
-        await message.answer("", reply_markup=main_reply_kb(chat_on))
-
-# Helper: restore only answer bar for a given run_id
-async def _restore_bar_only(cb: CallbackQuery, run_id: str):
-    async with session_scope() as st:
-        stt = await _ensure_user_state(st, cb.from_user.id)
-        import json
-        try:
-            la = json.loads(stt.last_answer) if stt.last_answer else {}
-        except Exception:
-            la = {}
-        saved = la.get("saved", False)
-        pinned = la.get("pinned", False)
-        artifact_id = la.get("artifact_id")
-        kb = answer_actions_kb(run_id, saved=saved, pinned=pinned, artifact_id=artifact_id)
-        if cb.message and isinstance(cb.message, Message):
-            try:
-                await cb.message.edit_reply_markup(reply_markup=kb)
-            except Exception:
-                pass
-            await _attach_reply_kb(cb.message, cb.from_user.id)
 
 # Helper to fetch preferred model
 async def get_preferred_model_helper(user_id: int) -> str:
@@ -122,29 +73,6 @@ async def get_preferred_model_helper(user_id: int) -> str:
         from app.services.memory import get_preferred_model
         return await get_preferred_model(st, user_id)
 
-# Approximate pricing per 1K tokens (input, output) for cost display
-_PRICING_PER_1K = {
-    "gpt-5": (0.002, 0.006),
-    "gpt-5-mini": (0.0010, 0.0030),
-    "gpt-5-nano": (0.0002, 0.0006),
-    "gpt-5-thinking": (0.010, 0.030),
-    "gpt-4.1": (0.005, 0.015),
-    "gpt-4o": (0.005, 0.015),
-    "gpt-4o-mini": (0.0005, 0.0015),
-    "gpt-4-turbo": (0.003, 0.009),
-    "gpt-4": (0.030, 0.060),
-    "gpt-3.5-turbo": (0.0015, 0.002),
-}
-_DEF_PRICE = (0.002, 0.006)
-
-def estimate_cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
-    mk = (model or "").lower()
-    in1k, out1k = _DEF_PRICE
-    for key, pair in _PRICING_PER_1K.items():
-        if mk.startswith(key):
-            in1k, out1k = pair
-            break
-    return (tokens_in / 1000.0) * in1k + (tokens_out / 1000.0) * out1k
 
 # -------------------- Utils
 def _ids_get(stt: UserState) -> list[int]:
@@ -287,8 +215,8 @@ async def _render_panel(m: Message, st, q: str | None = None, page: int = 1, use
     if not proj:
         print(f"DEBUG: No active project found for user {actual_user_id}")
         # Always include reply keyboard to prevent it from disappearing
-        chat_on, *_ = await get_chat_flags(st, actual_user_id)
-        await m.answer("Нет активного проекта. Создай или выбери.", reply_markup=main_reply_kb(chat_on))
+        await m.answer("Нет активного проекта. Создай или выбери.")
+        await svc_attach_reply_kb(m, actual_user_id)
         return
     stt = await _ensure_user_state(st, actual_user_id)
     sel = set(_ids_get(stt))
@@ -415,8 +343,6 @@ async def _render_panel(m: Message, st, q: str | None = None, page: int = 1, use
     
     # Always send reply keyboard to prevent it from disappearing
     chat_on, *_ = await get_chat_flags(st, actual_user_id)
-    # Removed temporary "..." message - using toast instead
-    # await m.answer("...", reply_markup=main_reply_kb(chat_on))
 
 @router.message(F.text == "❓ ASK‑WIZARD")
 async def ask_open(message: Message):
@@ -477,9 +403,8 @@ async def ask_open(message: Message):
             reply_markup=b.as_markup(),
         )
         
-        # FIX 4: Always include reply keyboard with status-strip message
-        chat_on, *_ = await get_chat_flags(st, message.from_user.id)
-        await message.answer("ASK-WIZARD открыт", reply_markup=main_reply_kb(chat_on))
+        # Always include reply keyboard without status message
+        await svc_attach_reply_kb(message, message.from_user.id)
 
 @router.callback_query(F.data == "aw:search")
 async def ask_search(cb: CallbackQuery):
@@ -504,18 +429,12 @@ async def ask_search(cb: CallbackQuery):
             # For now, we'll handle cleanup in the reply handler
             await st.commit()
         
-        # Always include reply keyboard
-        # Removed temporary "..." message
-        # async with session_scope() as st:
-        #     chat_on, *_ = await get_chat_flags(st, cb.from_user.id)
-        #     if cb.message:
-        #         await cb.message.answer("...", reply_markup=main_reply_kb(chat_on))
 
 @router.message(F.reply_to_message & (F.reply_to_message.text == "Введи название, #тег или id:..."))
 async def ask_search_reply(message: Message):
     if not message.from_user or not message.text:
         return
-    q = message.text.strip()
+    q = normalize_search_term(message.text)
     async with session_scope() as st:
         # Reset the awaiting_ask_search flag
         stt = await _ensure_user_state(st, message.from_user.id)
@@ -721,10 +640,9 @@ async def ask_autoclear(cb: CallbackQuery):
                 reply_markup=_panel_kb(len(_ids_get(stt)), budget_label, stt.auto_clear_selection),
             )
             
-        # FIX 4: Always send status-strip message with reply keyboard
-        chat_on, *_ = await get_chat_flags(st, cb.from_user.id)
+        # Always include reply keyboard without status message
         if cb.message:
-            await cb.message.answer("Auto-clear переключен", reply_markup=main_reply_kb(chat_on))
+            await svc_attach_reply_kb(cb.message, cb.from_user.id)
     await cb.answer()
 
 @router.callback_query(F.data == "aw:clear")
@@ -748,10 +666,9 @@ async def ask_clear(cb: CallbackQuery):
                 reply_markup=_panel_kb(0, "Бюджет: ~0 токенов", stt.auto_clear_selection),
             )
             
-        # FIX 4: Always send status-strip message with reply keyboard
-        chat_on, *_ = await get_chat_flags(st, cb.from_user.id)
+        # Always include reply keyboard without status message
         if cb.message:
-            await cb.message.answer("Выбор очищен", reply_markup=main_reply_kb(chat_on))
+            await svc_attach_reply_kb(cb.message, cb.from_user.id)
     await cb.answer("Очищено")
 
 @router.callback_query(F.data == "aw:arm")
@@ -815,7 +732,8 @@ async def ask_toggle_chat(cb: CallbackQuery, state: FSMContext):
     # 3. Перерисовать нижнюю реплай-клавиатуру
     try:
         if cb.message and isinstance(cb.message, Message):
-            await cb.message.answer("Чат: ON", reply_markup=main_reply_kb(True))
+            await cb.message.answer("Чат: ON")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id)
     except Exception as e:
         pass  # Continue even if we can't update the keyboard
     
@@ -877,8 +795,8 @@ async def run_question_with_selection(message: Message, prompt: str):
         # Compose a debug-only echo with selected ids. Do not call any LLM here.
         if not sel:
             # Always include reply keyboard to prevent it from disappearing
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id)
-            await message.answer("ASK: источники не выбраны (LLM отключён, тест-режим).", reply_markup=main_reply_kb(chat_on))
+            await message.answer("ASK: источники не выбраны (LLM отключён, тест-режим).")
+            await svc_attach_reply_kb(message, message.from_user.id)
             return
         # Escape prompt in simple way (no HTML parse here to avoid injection)
         try:
@@ -965,6 +883,10 @@ async def answer_delete_confirm(cb: CallbackQuery):
                     reply_markup=confirm_kb.as_markup()
                 )
                 print(f"DEBUG DEL confirm run={run_id}")
+                try:
+                    event("delete_confirm", user_id=cb.from_user.id, run_id=run_id)
+                except Exception:
+                    pass
                 await cb.answer()
             except Exception as e:
                 await cb.answer(f"Error showing confirmation: {str(e)}", show_alert=True)
@@ -1026,13 +948,15 @@ async def answer_delete_execute(cb: CallbackQuery):
                 await st.commit()
                 
                 # FIX 3: Send status-strip message with reply keyboard to restore it
-                chat_on, *_ = await get_chat_flags(st, cb.from_user.id)
                 await cb.message.bot.send_message(
                     chat_id=cb.message.chat.id,
-                    text="Удалено",
-                    reply_markup=main_reply_kb(chat_on)
+                    text="Удалено"
                 )
-                
+                await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
+                try:
+                    event("delete_done", user_id=cb.from_user.id, run_id=run_id)
+                except Exception:
+                    pass
                 await cb.answer("Удалено")
             except Exception as e:
                 await cb.answer(f"Error deleting messages: {str(e)}", show_alert=True)
@@ -1080,11 +1004,15 @@ async def answer_delete_cancel(cb: CallbackQuery):
         
         if cb.message and isinstance(cb.message, Message):
             try:
-                await cb.message.edit_reply_markup(reply_markup=kb)
+                await restore_answer_with_bar(cb, kb, cb.from_user.id)
+                try:
+                    event("delete_cancel", user_id=cb.from_user.id, run_id=run_id)
+                except Exception:
+                    pass
                 print(f"DEBUG DEL cancel run={run_id}")
                 await cb.answer("Отменено")
             except Exception as e:
-                # Even if keyboard update fails, still answer the callback
+                # Even if restore fails, still answer the callback
                 print(f"DEBUG: Error restoring keyboard: {e}")
                 await cb.answer("Отменено")
         else:
@@ -1205,6 +1133,10 @@ async def answer_sources(cb: CallbackQuery):
         if cb.message and isinstance(cb.message, Message):
             try:
                 await cb.message.edit_reply_markup(reply_markup=kb.as_markup())
+                try:
+                    event("sources_open", user_id=cb.from_user.id, run_id=run_id, page=page, total=total)
+                except Exception:
+                    pass
                 await cb.answer()
             except Exception as e:
                 await cb.answer(f"Error updating keyboard: {str(e)}", show_alert=True)
@@ -1246,10 +1178,11 @@ async def answer_sources_back(cb: CallbackQuery):
         
         if cb.message and isinstance(cb.message, Message):
             try:
-                await cb.message.edit_reply_markup(reply_markup=kb)
-                # Also ensure reply keyboard is present
-                chat_on, *_ = await get_chat_flags(st, cb.from_user.id)
-                await cb.message.answer("", reply_markup=main_reply_kb(chat_on))
+                await restore_answer_with_bar(cb, kb, cb.from_user.id)
+                try:
+                    event("sources_back", user_id=cb.from_user.id, run_id=run_id)
+                except Exception:
+                    pass
                 await cb.answer()
             except Exception as e:
                 await cb.answer(f"Error updating keyboard: {str(e)}", show_alert=True)
@@ -1318,6 +1251,11 @@ async def answer_save(cb: CallbackQuery):
         if cb.message and isinstance(cb.message, Message):
             try:
                 await cb.message.edit_reply_markup(reply_markup=kb)
+                await svc_attach_reply_kb(cb.message, cb.from_user.id)
+                try:
+                    event("save_done", user_id=cb.from_user.id, run_id=run_id, artifact_id=artifact_id)
+                except Exception:
+                    pass
                 await cb.answer("Сохранено ✅")
             except Exception:
                 await cb.answer("Сохранено ✅")
@@ -1366,6 +1304,11 @@ async def answer_pin(cb: CallbackQuery):
         if cb.message and isinstance(cb.message, Message):
             try:
                 await cb.message.edit_reply_markup(reply_markup=kb)
+                await svc_attach_reply_kb(cb.message, cb.from_user.id)
+                try:
+                    event("pin", user_id=cb.from_user.id, run_id=run_id, pinned=pinned)
+                except Exception:
+                    pass
                 await cb.answer("Закреплено 📌" if pinned else "Откреплено")
             except Exception as e:
                 await cb.answer(f"Error updating keyboard: {str(e)}", show_alert=True)
@@ -1434,6 +1377,10 @@ async def answer_summary(cb: CallbackQuery):
             answer_text = cb.message.text or cb.message.caption or ""
         
         # Show a message that we're generating summary
+        try:
+            event("summary", user_id=cb.from_user.id, run_id=run_id, text_len=len(answer_text or ""))
+        except Exception:
+            pass
         if cb.message and isinstance(cb.message, Message):
             await cb.message.answer("Генерирую краткое содержание...")
         
@@ -1479,6 +1426,10 @@ async def answer_refine(cb: CallbackQuery, state: FSMContext):
                 await st.commit()
                 # Set FSM state for refine
                 await state.update_data(awaiting_ask_question=True, ask_prompt_msg_id=tip.message_id)
+                try:
+                    event("refine_open", user_id=cb.from_user.id, run_id=run_id)
+                except Exception:
+                    pass
                 await cb.answer()
             except Exception as e:
                 await cb.answer(f"Error showing refine prompt: {str(e)}", show_alert=True)
@@ -1553,11 +1504,17 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
     # DEBUG ASK: selected_ids=<список> project_ids=<список>
     print(f"DEBUG ASK: selected_ids={selected_ids} project_ids={project_ids}")
 
+    # Normalize user input for consistent processing
+    normalized_question = normalize_user_input(msg.text)
+    
     # Save preliminary last_answer context immediately (unified schema)
-    run_id = f"run-{int(time.time())}-{hash(msg.text) % 10000}"
+    run_id = f"run-{int(time.time())}-{hash(normalized_question) % 10000}"
     async with session_scope() as st:
         stt = await _ensure_user_state(st, msg.from_user.id)
         import json
+        # If this question was initiated via Refine, capture parent run and emit telemetry
+        parent_run_id = getattr(stt, "ask_refine_run_id", None)
+        stt.ask_refine_run_id = None
         stt.last_answer = json.dumps({
             "run_id": run_id,
             "question_msg_id": msg.message_id,
@@ -1569,6 +1526,12 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
         })
         await st.commit()
     
+    if parent_run_id:
+        try:
+            event("refine_sent", user_id=msg.from_user.id, parent_run_id=parent_run_id, run_id=run_id, text_len=len(msg.text or ""))
+        except Exception:
+            pass
+    
     if not selected_ids:
         # Используем эфемерное уведомление вместо залипающего сообщения
         if msg.bot:
@@ -1576,9 +1539,7 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
             # Авто-удаляем через 3 секунды
             import asyncio
             asyncio.create_task(_auto_delete_message(msg.bot, msg.chat.id, temp_msg.message_id, delay=3.0))
-        await msg.bot.edit_message_text(chat_id=prep.chat.id, message_id=prep.message_id,
-                                        text="Нет выбранных источников.",
-                                        reply_markup=answer_actions_kb("test", saved=False, pinned=False))
+        await show_answer_with_bar(msg.bot, prep.chat.id, prep.message_id, "Нет выбранных источников.", answer_actions_kb("test", saved=False, pinned=False), user_id=msg.from_user.id)
         await state.update_data(awaiting_ask_question=False)
         return
 
@@ -1598,7 +1559,7 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
             used = list(selected_ids)
             metadata = {"model": (await get_preferred_model_helper(msg.from_user.id)), "tokens_in": 0, "tokens_out": 0, "duration_ms": 0}
         else:
-            answer_text, used, metadata = await run_llm_pipeline(
+            answer_text, used, metadata = await svc_run_llm(
                 user_id=msg.from_user.id,
                 selected_artifact_ids=selected_ids,
                 question=msg.text or "",
@@ -1615,11 +1576,15 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
         from app.services.token_budget import calculate_token_budget
         tokens_budget = calculate_token_budget(user_model)
         print(f"DEBUG LLM error: exc={e} model={user_model} tokens_budget={tokens_budget}")
+        try:
+            error("llm_error", user_id=msg.from_user.id, run_id=run_id, model=user_model, err=str(e))
+        except Exception:
+            pass
         warn = (
             f"⚠️ Не удалось получить ответ от модели. Попробуй ещё раз или проверь ключ/лимиты. "
             f"Project: {proj_name} • Scope: {scope} • Model: {user_model}"
         )
-        await msg.bot.edit_message_text(chat_id=prep.chat.id, message_id=prep.message_id, text=warn)
+        await show_answer_with_bar(msg.bot, prep.chat.id, prep.message_id, warn, answer_actions_kb(run_id, saved=False, pinned=False), user_id=msg.from_user.id)
         await state.update_data(awaiting_ask_question=False)
         async with session_scope() as st:
             stt = await _ensure_user_state(st, msg.from_user.id)
@@ -1681,8 +1646,8 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
     from app.services.token_budget import calculate_token_budget
     from app.services.llm import LLM_MAX_TOKENS_OUT
     in_budget = calculate_token_budget(model_used, LLM_MAX_TOKENS_OUT)
-    cost = estimate_cost_usd(model_used, ti, to)
-    context_line = f"Project: {proj_name} • Scope: {scope} • Model: {model_used} Budget: ~{in_budget} • ≈ ${cost:.4f}"
+    cost = svc_compute_cost(model_used, ti, to)
+    context_line = svc_build_ctx_line(proj_name, scope, model_used, in_budget, cost)
 
     # Sources short line inside message
     sources_line = ""
@@ -1693,10 +1658,7 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
                 ttl = (await st.execute(sa.select(Artifact.title).where(Artifact.id == first_id))).scalar_one_or_none()
             except Exception:
                 ttl = None
-        short_title = ttl or str(first_id)
-        if len(short_title) > 18:
-            short_title = short_title[:18] + " …"
-        sources_line = f"📚 Sources: [#{short_title} … id{first_id}]"
+        sources_line = svc_build_sources_short((ttl or str(first_id)), first_id)
 
     # показать итог и панель
     kb = answer_actions_kb(run_id, saved=False, pinned=False)
@@ -1704,12 +1666,7 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
     if sources_line:
         final_text += "\n\n" + sources_line
     final_text += "\n" + context_line
-    await msg.bot.edit_message_text(
-        chat_id=prep.chat.id,
-        message_id=prep.message_id,
-        text=final_text,
-        reply_markup=kb
-    )
+    await show_answer_with_bar(msg.bot, prep.chat.id, prep.message_id, final_text, kb, user_id=msg.from_user.id)
     
     # Persist rendered text and run meta for reliable restore/open
     async with session_scope() as st:
@@ -1725,9 +1682,7 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
         await st.commit()
     
     # Ensure reply keyboard is present after final answer
-    async with session_scope() as st:
-        chat_on, *_ = await get_chat_flags(st, msg.from_user.id)
-        await msg.answer("", reply_markup=main_reply_kb(chat_on))
+    await svc_attach_reply_kb(msg, msg.from_user.id)
     
     if auto_cleared:
         async with session_scope() as st:
@@ -1783,6 +1738,10 @@ async def answer_open_page(cb: CallbackQuery):
         if cb.message and isinstance(cb.message, Message):
             try:
                 await cb.message.edit_text(chunk, reply_markup=kb.as_markup())
+                try:
+                    event("open_page", user_id=cb.from_user.id, run_id=run_id, artifact_id=artifact_id, page=page, total_pages=total_pages)
+                except Exception:
+                    pass
             except Exception as e:
                 return await cb.answer(f"Ошибка: {str(e)}", show_alert=True)
     await cb.answer()
@@ -1807,6 +1766,17 @@ async def answer_open_download(cb: CallbackQuery):
         file = BufferedInputFile(content, filename)
         if cb.message and isinstance(cb.message, Message) and cb.message.bot:
             await cb.message.bot.send_document(cb.message.chat.id, document=file, caption=art.title or filename)
+            try:
+                # Get run_id from context for telemetry
+                stt = await _ensure_user_state(st, cb.from_user.id)
+                try:
+                    ctx = json.loads(stt.last_answer) if stt.last_answer else {}
+                except Exception:
+                    ctx = {}
+                run_id = ctx.get("run_id", "")
+                event("open_download", user_id=cb.from_user.id, run_id=run_id, artifact_id=artifact_id)
+            except Exception:
+                pass
     await cb.answer("Готово")
 
 @router.callback_query(F.data.startswith("ask:answer:open:back:"))
@@ -1830,18 +1800,19 @@ async def answer_open_back(cb: CallbackQuery):
         pinned = ctx.get("pinned", False)
         artifact_id = ctx.get("artifact_id")
         kb = answer_actions_kb(run_id, saved=saved, pinned=pinned, artifact_id=artifact_id)
-        if cb.message and isinstance(cb.message, Message):
+        if cb.message and isinstance(cb.message, Message) and cb.message.bot:
             try:
-                await cb.message.edit_text(text, reply_markup=kb)
+                await show_answer_with_bar(cb.message.bot, cb.message.chat.id, cb.message.message_id, text, kb, user_id=cb.from_user.id)
+                try:
+                    event("open_back", user_id=cb.from_user.id, run_id=run_id, artifact_id=artifact_id)
+                except Exception:
+                    pass
             except Exception:
                 # fallback to just keyboard restore
                 try:
-                    await cb.message.edit_reply_markup(reply_markup=kb)
+                    await restore_answer_with_bar(cb, kb, cb.from_user.id)
                 except Exception:
                     pass
-            # Reattach reply keyboard subtly
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id)
-            await cb.message.answer("", reply_markup=main_reply_kb(chat_on))
     await cb.answer("Вернулось")
 
 @router.callback_query(F.data.startswith("ask:answer:open:"))
@@ -1917,69 +1888,10 @@ async def answer_open(cb: CallbackQuery):
         if cb.message and isinstance(cb.message, Message):
             try:
                 await cb.message.edit_text(card, reply_markup=kb.as_markup())
+                try:
+                    event("open_card", user_id=cb.from_user.id, run_id=run_id, artifact_id=artifact_id)
+                except Exception:
+                    pass
             except Exception as e:
                 return await cb.answer(f"Ошибка: {str(e)}", show_alert=True)
     await cb.answer()
-
-async def run_llm_pipeline(
-    user_id: int,
-    selected_artifact_ids: list[int],
-    question: str,
-    run_id: str | None = None
-) -> tuple[str, list[int], dict]:
-    """
-    Run the complete LLM pipeline.
-    
-    Returns:
-        Tuple of (response_text, run_id, used_source_ids)
-    """
-    import time
-    from app.services.retrieval import load_selected_sources
-    from app.services.prompt_builder import build_system_prompt, build_context_prompt, build_user_prompt
-    from app.services.token_budget import calculate_token_budget, allocate_budget_per_source
-    from app.services.llm import call_llm_with_retry
-    from app.services.llm import LLM_MAX_TOKENS_OUT, LLM_TEMPERATURE, LLM_TIMEOUT
-    from app.services.memory import get_preferred_model
-    
-    # FIX 5: Get user's selected model instead of default
-    async with session_scope() as st:
-        user_model = await get_preferred_model(st, user_id)
-    
-    # Calculate available input budget for logging
-    in_budget = calculate_token_budget(user_model, LLM_MAX_TOKENS_OUT)
-    print(f"DEBUG LLM start: model={user_model} tokens_budget={in_budget}")
-    try:
-        event("llm_start", user_id=user_id, model=user_model, tokens_budget=in_budget)
-    except Exception:
-        pass
-    
-    # Load selected sources
-    sources, total_tokens = await load_selected_sources(user_id, selected_artifact_ids)
-    
-    # Build prompts
-    system_prompt = build_system_prompt()
-    context_prompt = build_context_prompt(sources)
-    user_prompt = build_user_prompt(question)
-    
-    # Call LLM
-    response_text, metadata = await call_llm_with_retry(
-        system_prompt=system_prompt,
-        context_prompt=context_prompt,
-        user_prompt=user_prompt,
-        model=user_model,
-        temperature=LLM_TEMPERATURE,
-        max_tokens=LLM_MAX_TOKENS_OUT,
-        timeout=LLM_TIMEOUT
-    )
-
-    # Ensure run_id
-    if not run_id:
-        run_id = f"run-{int(time.time())}-{hash(question) % 10000}"
-
-    # Extend metadata
-    metadata = {**metadata, "model": user_model}
-
-    # DEBUG LLM done
-    print(f"DEBUG LLM done: run_id={run_id} used_sources={selected_artifact_ids} len(text)={len(response_text)} duration_ms={metadata.get('duration_ms', 0)}")
-    
-    return response_text, selected_artifact_ids, metadata

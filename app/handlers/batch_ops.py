@@ -1,8 +1,8 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 from app.db import session_scope
-from app.handlers.keyboard import main_reply_kb as build_reply_kb
-from app.services.memory import get_chat_flags, _ensure_user_state
+from app.services.ui_helpers import attach_reply_kb as svc_attach_reply_kb
+from app.services.memory import _ensure_user_state
 from app.services.tags import get_presets
 from sqlalchemy import delete
 from app.models import Artifact, artifact_tags, Tag
@@ -88,8 +88,6 @@ async def batch_tag_toggle(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("batch:tagdone:"))
 async def batch_tag_done(cb: CallbackQuery):
     """Apply selected tags to all artifacts in batch."""
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.data:
         return await cb.answer("Invalid data")
         
@@ -146,8 +144,6 @@ async def batch_tag_done(cb: CallbackQuery):
             
         await st.commit()
         
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, user_id)
         
         # Clear tag cache
         BATCH_TAG_CACHE.pop(user_id, None)
@@ -155,9 +151,9 @@ async def batch_tag_done(cb: CallbackQuery):
     if cb.message and isinstance(cb.message, Message):
         await cb.message.answer(
             f"🏷 Теги для пакета: {escape(', '.join(tags))}\n"
-            f"Применены к {len(batch_ids)} артефактам",
-            reply_markup=build_reply_kb(chat_on)
+            f"Применены к {len(batch_ids)} артефактам"
         )
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer("Теги применены")
 
 @router.callback_query(F.data.startswith("batch:tagfree:"))
@@ -182,8 +178,6 @@ async def batch_tag_free(cb: CallbackQuery):
 @router.message(F.reply_to_message & F.reply_to_message.text.startswith("Свои теги для пакета"))
 async def batch_tags_free_reply(message: Message):
     """Handle custom tags input for batch."""
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not message.from_user:
         return
         
@@ -191,25 +185,24 @@ async def batch_tags_free_reply(message: Message):
     tags = [t.strip() for t in (message.text or "").split(",") if t.strip()]
     
     if not tags:
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, user_id)
-        return await message.answer("Пусто.", reply_markup=build_reply_kb(chat_on))
+        await message.answer("Пусто.")
+        await svc_attach_reply_kb(message, user_id)
+        return
         
     async with session_scope() as st:
         # Get user state to retrieve batch IDs
         stt = await _ensure_user_state(st, user_id)
         if not stt.last_batch_ids:
-            # Get chat_on flag to rebuild keyboard with correct state
-            chat_on, *_ = await get_chat_flags(st, user_id)
-            return await message.answer("Не найден пакет для тегов.", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Не найден пакет для тегов.")
+            await svc_attach_reply_kb(message, user_id)
+            return
             
         # Parse batch IDs
         batch_ids = [int(x) for x in stt.last_batch_ids.split(",") if x.strip().isdigit()]
         if not batch_ids:
-            # Get chat_on flag to rebuild keyboard with correct state
-            chat_on, *_ = await get_chat_flags(st, user_id)
-            return await message.answer("Некорректный пакет.", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Некорректный пакет.")
+            await svc_attach_reply_kb(message, user_id)
+            return
             
         # Create tag objects first to ensure they exist in the tags table
         tag_objects = []
@@ -243,20 +236,16 @@ async def batch_tags_free_reply(message: Message):
             
         await st.commit()
         
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, user_id)
         
     await message.answer(
         f"🏷 Теги для пакета: {escape(', '.join(tags))}\n"
-        f"Применены к {len(batch_ids)} артефактам",
-        reply_markup=build_reply_kb(chat_on)
+        f"Применены к {len(batch_ids)} артефактам"
     )
+    await svc_attach_reply_kb(message, user_id)
 
 @router.callback_query(F.data == "batch:delete")
 async def batch_delete(cb: CallbackQuery):
     """Delete all artifacts in batch."""
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     async with session_scope() as st:
         # Get user state to retrieve batch IDs
         stt = await _ensure_user_state(st, cb.from_user.id if cb.from_user else 0)
@@ -272,8 +261,6 @@ async def batch_delete(cb: CallbackQuery):
         result = await st.execute(delete(Artifact).where(Artifact.id.in_(batch_ids)))
         await st.commit()
         
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
         
         # Clear the batch from user state
         stt.last_batch_ids = None
@@ -282,7 +269,7 @@ async def batch_delete(cb: CallbackQuery):
         
     if cb.message and isinstance(cb.message, Message):
         await cb.message.answer(
-            f"🗑 Пакет удалён: {result.rowcount} артефактов",
-            reply_markup=build_reply_kb(chat_on)
+            f"🗑 Пакет удалён: {result.rowcount} артефактов"
         )
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer("Пакет удалён")

@@ -9,7 +9,7 @@ from app.services.memory import (
     get_active_project, get_preferred_model, get_context_filters_state, count_artifacts,
     get_chat_flags, get_linked_project_ids, list_projects
 )
-from app.handlers.keyboard import main_reply_kb as build_reply_kb
+from app.services.ui_helpers import attach_reply_kb as svc_attach_reply_kb
 from html import escape
 
 router = Router()
@@ -45,6 +45,5 @@ async def status_cmd(message: Message):
     async with session_scope() as st:
         if message.from_user:
             text = await render_status(st, message.from_user.id)
-            # Get chat_on flag to rebuild keyboard with correct state
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id)
-            await message.answer(text, reply_markup=build_reply_kb(chat_on))
+            await message.answer(text)
+            await svc_attach_reply_kb(message, message.from_user.id)

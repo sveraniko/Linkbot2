@@ -7,6 +7,7 @@ from app.db import session_scope
 from app.ui import show_panel
 from app.services.memory import get_active_project
 from app.models import Artifact, artifact_tags
+from app.services.ui_helpers import attach_reply_kb as svc_attach_reply_kb
 from zoneinfo import ZoneInfo
 
 # Add Berlin timezone
@@ -46,12 +47,16 @@ async def cleanup_date_reply(message: Message):
         return
     m = re.search(r"(\d{4}-\d{2}-\d{2})", message.text or "")
     if not m:
-        return await message.answer("Формат неверный. Пример: 2025-09-13")
+        await message.answer("Формат неверный. Пример: 2025-09-13")
+        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+        return
     d0 = dt.date.fromisoformat(m.group(1))
     async with session_scope() as st:
         proj = await get_active_project(st, message.from_user.id if message.from_user else 0)
         if not proj:
-            return await message.answer("Сначала выбери проект (Actions → Projects).")
+            await message.answer("Сначала выбери проект (Actions → Projects).")
+            await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+            return
         # Use Berlin timezone for date comparison
         cnt = (await st.execute(
             sa.select(sa.func.count())
@@ -71,8 +76,6 @@ async def cleanup_date_reply(message: Message):
 
 @router.callback_query(F.data.startswith("cleanup:confirm:date:"))
 async def cleanup_confirm_date(cb: CallbackQuery):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     from app.ui import clear_panel
     if not cb.data:
         return await cb.answer("Invalid data")
@@ -83,10 +86,10 @@ async def cleanup_confirm_date(cb: CallbackQuery):
     async with session_scope() as st:
         proj = await get_active_project(st, cb.from_user.id if cb.from_user else 0)
         if not proj:
-            # Get chat_on flag to rebuild keyboard with correct state
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
             if cb.message and isinstance(cb.message, Message):
-                return await cb.message.answer("Нет активного проекта", reply_markup=build_reply_kb(chat_on))
+                await cb.message.answer("Нет активного проекта")
+                await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
+                return
             return await cb.answer("Нет активного проекта", show_alert=True)
         # Use Berlin timezone for date comparison
         deleted = (await st.execute(
@@ -100,10 +103,8 @@ async def cleanup_confirm_date(cb: CallbackQuery):
         # Снесём панель подтверждения:
         await clear_panel(st, cb.message.bot, cb.message.chat.id, cb.from_user.id if cb.from_user else 0)
     if cb.message and isinstance(cb.message, Message):
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-        await cb.message.answer(f"🧹 Удалено (с {d}): {deleted or 0}", reply_markup=build_reply_kb(chat_on))
+        await cb.message.answer(f"🧹 Удалено (с {d}): {deleted or 0}")
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 # --- BY TAG ---
@@ -118,8 +119,6 @@ async def cleanup_bytag(cb: CallbackQuery):
 
 @router.message(F.reply_to_message & F.reply_to_message.text.startswith("Введи тег (точное совпадение)"))
 async def cleanup_tag_reply(message: Message):
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     from app.ui import show_panel
     if not message.bot:
         return
@@ -127,17 +126,15 @@ async def cleanup_tag_reply(message: Message):
     async with session_scope() as st:
         proj = await get_active_project(st, message.from_user.id if message.from_user else 0)
         if not proj:
-            # Get chat_on flag to rebuild keyboard with correct state
-            chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
-            return await message.answer("Сначала выбери проект (Actions → Projects).", reply_markup=build_reply_kb(chat_on))
+            await message.answer("Сначала выбери проект (Actions → Projects).")
+            await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+            return
         if pattern.endswith("*"):
             like = pattern[:-1] + "%"
             sel = sa.select(artifact_tags.c.artifact_id).where(artifact_tags.c.tag_name.like(like))
         else:
             sel = sa.select(artifact_tags.c.artifact_id).where(artifact_tags.c.tag_name == pattern)
         ids = [r[0] for r in (await st.execute(sel)).fetchall()]
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=f"✅ Delete {len(ids)}", callback_data=f"cleanup:confirm:tag"),
             InlineKeyboardButton(text="✖ Cancel", callback_data="cleanup:cancel")
@@ -155,8 +152,6 @@ async def cleanup_tag_reply(message: Message):
 @router.callback_query(F.data == "cleanup:confirm:tag")
 async def cleanup_confirm_tag(cb: CallbackQuery):
     from app.services.memory import _ensure_user_state
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     from app.ui import clear_panel
     if not cb.message or not cb.message.bot:
         return await cb.answer("Invalid message")
@@ -172,23 +167,18 @@ async def cleanup_confirm_tag(cb: CallbackQuery):
         # Снесём панель подтверждения:
         await clear_panel(st, cb.message.bot, cb.message.chat.id, cb.from_user.id if cb.from_user else 0)
     if cb.message and isinstance(cb.message, Message):
-        # Get chat_on flag to rebuild keyboard with correct state
-        async with session_scope() as st:
-            chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
-        await cb.message.answer(f"🧹 Удалено по тегу: {res.rowcount or 0}", reply_markup=build_reply_kb(chat_on))
+        await cb.message.answer(f"🧹 Удалено по тегу: {res.rowcount or 0}")
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer()
 
 @router.callback_query(F.data == "cleanup:cancel")
 async def cleanup_cancel(cb: CallbackQuery):
     from app.ui import clear_panel
-    from app.handlers.keyboard import main_reply_kb as build_reply_kb
-    from app.services.memory import get_chat_flags
     if not cb.message or not cb.message.bot:
         return await cb.answer("Invalid message")
     async with session_scope() as st:
         await clear_panel(st, cb.message.bot, cb.message.chat.id, cb.from_user.id if cb.from_user else 0)
-        # Get chat_on flag to rebuild keyboard with correct state
-        chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
         if cb.message and isinstance(cb.message, Message):
-            await cb.message.answer("Операция отменена", reply_markup=build_reply_kb(chat_on))
+            await cb.message.answer("Операция отменена")
+            await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
     await cb.answer("Отменено")
