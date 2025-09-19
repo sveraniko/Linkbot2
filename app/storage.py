@@ -17,16 +17,16 @@ def _client_or_none() -> Optional[Minio]:
     global _client
     if _client:
         return _client
-    if not settings.minio_endpoint:
+    if not settings.minio.endpoint:
         return None
     
     try:
-        endpoint = settings.minio_endpoint.replace("http://", "").replace("https://", "")
+        endpoint = settings.minio.endpoint.replace("http://", "").replace("https://", "")
         _client = Minio(
             endpoint,
-            access_key=settings.minio_access_key or "",
-            secret_key=settings.minio_secret_key or "",
-            secure=bool(settings.minio_secure),
+            access_key=settings.minio.access_key.get_secret_value() if settings.minio.access_key else "",
+            secret_key=settings.minio.secret_key.get_secret_value() if settings.minio.secret_key else "",
+            secure=bool(settings.minio.secure),
         )
         return _client
     except Exception as e:
@@ -40,7 +40,7 @@ async def ensure_bucket() -> None:
         return
     
     try:
-        bucket = settings.minio_bucket
+        bucket = settings.minio.bucket
         if not c.bucket_exists(bucket):
             c.make_bucket(bucket)
     except Exception as e:
@@ -55,12 +55,12 @@ async def save_file(filename: str, data: bytes) -> str | None:
     try:
         await ensure_bucket()
         key = f"{uuid.uuid4()}-{filename}"
-        c.put_object(settings.minio_bucket, key, io.BytesIO(data), length=len(data))
+        c.put_object(settings.minio.bucket, key, io.BytesIO(data), length=len(data))
         
         # Generate public URL using MINIO_PUBLIC_URL or fallback to endpoint
-        public_base = os.getenv("MINIO_PUBLIC_URL") or settings.minio_endpoint or ""
+        public_base = os.getenv("MINIO_PUBLIC_URL") or settings.minio.endpoint or ""
         if public_base:
-            return urljoin(f"{public_base.rstrip('/')}/", f"{settings.minio_bucket}/{key}")
+            return urljoin(f"{public_base.rstrip('/')}/", f"{settings.minio.bucket}/{key}")
         return None
     except Exception as e:
         logger.warning(f"Failed to save file to MinIO: {e}")
@@ -77,7 +77,7 @@ async def load_file(key: str) -> Optional[bytes]:
         if "/" in key:
             key = key.split("/")[-1]  # Get last part as key
         
-        response = c.get_object(settings.minio_bucket, key)
+        response = c.get_object(settings.minio.bucket, key)
         data = response.read()
         response.close()
         response.release_conn()
@@ -97,7 +97,7 @@ async def delete_file(key: str) -> bool:
         if "/" in key:
             key = key.split("/")[-1]
         
-        c.remove_object(settings.minio_bucket, key)
+        c.remove_object(settings.minio.bucket, key)
         return True
     except Exception as e:
         logger.warning(f"Failed to delete file from MinIO: {e}")

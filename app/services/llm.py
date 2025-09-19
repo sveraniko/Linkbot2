@@ -19,7 +19,7 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 LLM_DISABLED = os.getenv("LLM_DISABLED", "0") == "1"
 
 # Initialize OpenAI client
-client = AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
+client = AsyncOpenAI(api_key=settings.llm.openai_api_key.get_secret_value() if settings.llm.openai_api_key else None) if settings.llm.openai_api_key else None
 
 # HOTFIX: put near your OpenAI call builder
 TEMPERATURE_SUPPORTED = (

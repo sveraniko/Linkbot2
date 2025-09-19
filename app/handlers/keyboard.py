@@ -5,6 +5,7 @@ from aiogram.types import Message
 from app.db import session_scope
 from app.services.memory import get_chat_flags, set_chat_mode
 from app.services.ui_helpers import attach_reply_kb as svc_attach_reply_kb, main_reply_kb, BTN_ACTIONS, BTN_CHAT_ON, BTN_CHAT_OFF, BTN_ASK
+from app.utils.error_handling import safe_delete_message
 
 router = Router(name="keyboard")
 
@@ -28,19 +29,23 @@ async def open_actions_from_kb(message: Message):
 
     if open_menu:
         # Delete the command message to keep chat clean
-        try:
-            await message.delete()
-        except Exception:
-            pass
+        await safe_delete_message(
+            message.bot, 
+            message.chat.id, 
+            message.message_id,
+            message.from_user.id if message.from_user else None
+        )
         return await open_menu(message)
 
     # Фоллбек, если прямой вызов не найден:
     # лучше вернуть подсказку, чем молчать
     # Delete the command message to keep chat clean
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    await safe_delete_message(
+        message.bot,
+        message.chat.id,
+        message.message_id,
+        message.from_user.id if message.from_user else None
+    )
     return await message.answer("Открой меню командой /menu")
 
 @router.message(F.text == BTN_ASK)
@@ -50,10 +55,12 @@ async def open_ask_from_kb(message: Message):
     """
     from app.handlers.ask import ask_open
     # Delete the command message to keep chat clean
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    await safe_delete_message(
+        message.bot,
+        message.chat.id, 
+        message.message_id,
+        message.from_user.id if message.from_user else None
+    )
     return await ask_open(message)
 
 @router.message(F.text.in_({BTN_CHAT_ON, BTN_CHAT_OFF}))
@@ -67,10 +74,12 @@ async def kb_chat_toggle(message: Message):
         await set_chat_mode(st, message.from_user.id, on=new_state)
         await st.commit()
         # Delete the command message to keep chat clean
-        try:
-            await message.delete()
-        except Exception:
-            pass
+        await safe_delete_message(
+            message.bot,
+            message.chat.id,
+            message.message_id, 
+            message.from_user.id
+        )
         async with session_scope() as st2:
             chat_on, *_ = await get_chat_flags(st2, message.from_user.id)
             await message.answer(

@@ -6,10 +6,10 @@
 """
 from __future__ import annotations
 from typing import Optional
-import contextlib
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from app.db import session_scope
 from app.services.memory import get_chat_flags
+from app.utils.error_handling import safe_edit_message_text, safe_edit_message_reply_markup, toast_or_log
 
 BTN_ACTIONS = "⚙️ Actions"
 BTN_CHAT_ON = "💬 Chat: ON"
@@ -36,20 +36,36 @@ async def show_answer_with_bar(bot, chat_id: int, message_id: int, text: str, ba
     - bar: InlineKeyboardMarkup to attach
     - user_id: for restoring reply keyboard state (optional)
     """
-    try:
-        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=bar)
-    except Exception:
-        # Best effort: try updating only markup
-        with contextlib.suppress(Exception):
-            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=bar)
+    # Try to edit full message first
+    success = await safe_edit_message_text(bot, chat_id, message_id, text, reply_markup=bar)
+    
+    if not success:
+        # Best effort fallback: try updating only markup
+        markup_success = await safe_edit_message_reply_markup(bot, chat_id, message_id, bar)
+        if not markup_success:
+            toast_or_log(
+                "Could not update answer",
+                f"Failed to edit message {message_id} in chat {chat_id}, both text and markup updates failed",
+                user_id
+            )
     # Не отправляем дополнительное сообщение для обновления клавиатуры
 
 
 async def restore_answer_with_bar(cb: CallbackQuery, bar, user_id: int) -> None:
     """Restore only the inline bar for the answer message and reattach reply keyboard."""
     if cb.message and isinstance(cb.message, Message):
-        with contextlib.suppress(Exception):
-            await cb.message.edit_reply_markup(reply_markup=bar)
+        success = await safe_edit_message_reply_markup(
+            cb.bot, 
+            cb.message.chat.id, 
+            cb.message.message_id, 
+            bar
+        )
+        if not success:
+            toast_or_log(
+                "Could not restore answer bar",
+                f"Failed to restore markup for message {cb.message.message_id} in chat {cb.message.chat.id}",
+                user_id
+            )
         # Не отправляем дополнительное сообщение для обновления клавиатуры
 
 

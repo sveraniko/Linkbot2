@@ -31,6 +31,9 @@ from app.utils.tg import _toast, _safe_delete, _send_ephemeral  # Add this impor
 from app.utils.callback import safe_callback_data, check_callback_size
 from app.utils.unicode_utils import normalize_user_input, normalize_search_term
 from app.services.telemetry import event, error
+# Structured logging
+import structlog
+logger = structlog.get_logger(__name__)
 # Service-layer imports
 from app.services.llm_pipeline import run_llm_pipeline as svc_run_llm
 from app.services.ask_list import list_sources as svc_list_sources
@@ -348,7 +351,15 @@ async def _render_panel(m: Message, st, q: str | None = None, page: int = 1, use
 async def ask_open(message: Message):
     """Open ASK wizard root. This never calls LLM."""
     if not message.from_user:
+        logger.warning("ASK wizard opened without user", action="ask_open")
         return
+    
+    logger.info(
+        "ASK wizard opened",
+        action="ask_open",
+        user_id=message.from_user.id,
+        chat_id=message.chat.id if message.chat else None
+    )
     async with session_scope() as st:
         stt = await _ensure_user_state(st, message.from_user.id)
         stt.ask_armed = False
@@ -409,6 +420,7 @@ async def ask_open(message: Message):
 @router.callback_query(F.data == "aw:search")
 async def ask_search(cb: CallbackQuery):
     if not cb.from_user:
+        logger.warning("Search initiated without user", action="ask_search")
         # Always include reply keyboard
         async with session_scope() as st:
             chat_on, *_ = await get_chat_flags(st, cb.from_user.id if cb.from_user else 0)
@@ -416,6 +428,13 @@ async def ask_search(cb: CallbackQuery):
             # if cb.message:
             #     await cb.message.answer("...", reply_markup=main_reply_kb(chat_on))
         return await cb.answer("Invalid user")
+    
+    logger.info(
+        "Search dialog opened",
+        action="ask_search",
+        user_id=cb.from_user.id,
+        chat_id=cb.message.chat.id if cb.message and cb.message.chat else None
+    )
     await cb.answer()
     if cb.message:
         prompt_msg = await cb.message.answer("Введи название, #тег или id:...", reply_markup=ForceReply(selective=True))
@@ -433,8 +452,17 @@ async def ask_search(cb: CallbackQuery):
 @router.message(F.reply_to_message & (F.reply_to_message.text == "Введи название, #тег или id:..."))
 async def ask_search_reply(message: Message):
     if not message.from_user or not message.text:
+        logger.warning("Search reply without user or text", action="ask_search_reply")
         return
     q = normalize_search_term(message.text)
+    
+    logger.info(
+        "Search executed",
+        action="ask_search_reply", 
+        user_id=message.from_user.id,
+        search_query=q,
+        query_length=len(message.text)
+    )
     async with session_scope() as st:
         # Reset the awaiting_ask_search flag
         stt = await _ensure_user_state(st, message.from_user.id)
@@ -1447,6 +1475,12 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
         stt = await _ensure_user_state(st, msg.from_user.id)
         # Check if already processing a question (in-flight protection)
         if hasattr(stt, 'ask_inflight') and stt.ask_inflight:
+            logger.info(
+                "ASK request blocked - already processing",
+                action="ask_question_receiver",
+                user_id=msg.from_user.id,
+                blocked_reason="inflight"
+            )
             if msg.bot:
                 temp_msg = await msg.answer("Обрабатываю предыдущий запрос...")
                 asyncio.create_task(_auto_delete_message(msg.bot, msg.chat.id, temp_msg.message_id, delay=3.0))
@@ -1482,10 +1516,23 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
         # собрать выбранные источники из БД (не из FSM!)
         selected_ids = await _get_selected_source_ids(st, msg.from_user.id)
         
-    # DEBUG ASK: chat_on=<bool> project_ids=[…] selected=[…]
-    print(f"DEBUG ASK: chat_on={chat_on} project_ids={project_ids} selected={selected_ids}")
+    logger.info(
+        "ASK question received",
+        action="ask_question_receiver",
+        user_id=msg.from_user.id,
+        chat_on=chat_on,
+        project_count=len(project_ids),
+        selected_count=len(selected_ids),
+        question_length=len(msg.text or "")
+    )
     
     if not chat_on:
+        logger.warning(
+            "ASK blocked - chat disabled",
+            action="ask_question_receiver",
+            user_id=msg.from_user.id,
+            chat_on=chat_on
+        )
         # Используем эфемерное уведомление вместо залипающего сообщения
         if msg.bot:
             temp_msg = await msg.answer("Включи чат кнопкой внизу или через ASK‑панель.")
@@ -1533,6 +1580,12 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
             pass
     
     if not selected_ids:
+        logger.warning(
+            "ASK blocked - no sources selected",
+            action="ask_question_receiver",
+            user_id=msg.from_user.id,
+            project_count=len(project_ids)
+        )
         # Используем эфемерное уведомление вместо залипающего сообщения
         if msg.bot:
             temp_msg = await msg.answer("Выбери источники в List.")
@@ -1549,12 +1602,24 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
         stt.ask_inflight = True
         await st.commit()
 
-    # DEBUG ASK start: q=…, src=[…]
-    print(f"DEBUG ASK start: q={msg.text} src={selected_ids}")
+    logger.info(
+        "LLM processing started",
+        action="ask_question_receiver",
+        user_id=msg.from_user.id,
+        run_id=run_id,
+        selected_source_count=len(selected_ids),
+        question_preview=msg.text[:100] if msg.text else ""
+    )
     
     try:
         from app.config import LLM_DISABLED
         if LLM_DISABLED:
+            logger.warning(
+                "LLM disabled by admin",
+                action="ask_question_receiver",
+                user_id=msg.from_user.id,
+                run_id=run_id
+            )
             answer_text = "LLM временно отключён админом."
             used = list(selected_ids)
             metadata = {"model": (await get_preferred_model_helper(msg.from_user.id)), "tokens_in": 0, "tokens_out": 0, "duration_ms": 0}
@@ -1564,6 +1629,17 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
                 selected_artifact_ids=selected_ids,
                 question=msg.text or "",
                 run_id=run_id
+            )
+            logger.info(
+                "LLM processing completed",
+                action="ask_question_receiver",
+                user_id=msg.from_user.id,
+                run_id=run_id,
+                model=metadata.get("model"),
+                tokens_in=metadata.get("tokens_in"),
+                tokens_out=metadata.get("tokens_out"),
+                duration_ms=metadata.get("duration_ms"),
+                used_source_count=len(used)
             )
         # Keep ForceReply prompt message as per UX requirement (do not delete)
     except Exception as e:
@@ -1576,6 +1652,18 @@ async def ask_question_receiver(msg: Message, state: FSMContext):
         from app.services.token_budget import calculate_token_budget
         tokens_budget = calculate_token_budget(user_model)
         print(f"DEBUG LLM error: exc={e} model={user_model} tokens_budget={tokens_budget}")
+        logger.error(
+            "LLM processing failed",
+            action="ask_question_receiver",
+            user_id=msg.from_user.id,
+            run_id=run_id,
+            model=user_model,
+            error=str(e),
+            error_type=type(e).__name__,
+            project_name=proj_name,
+            scope=scope,
+            tokens_budget=tokens_budget
+        )
         try:
             error("llm_error", user_id=msg.from_user.id, run_id=run_id, model=user_model, err=str(e))
         except Exception:

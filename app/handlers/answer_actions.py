@@ -612,7 +612,7 @@ async def refine_reply(message: Message):
             chunks = await get_chunks_by_artifact_ids(st, sel_ids, limit=200)
         else:
             # Use default context gathering
-            chunks = await gather_context(st, proj, user_id=message.from_user.id if message.from_user else 0, max_chunks=settings.project_max_chunks)
+            chunks = await gather_context(st, proj, user_id=message.from_user.id if message.from_user else 0, max_chunks=settings.processing.project_max_chunks)
             
         model = await get_preferred_model(st, message.from_user.id if message.from_user else 0)
         answer = await ask_llm(message.text, chunks, model=model)

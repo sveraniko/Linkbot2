@@ -14,6 +14,7 @@ import logging
 from html import escape
 from app.services.ui_helpers import attach_reply_kb as svc_attach_reply_kb
 from app.services.telemetry import error
+from app.utils.error_handling import toast_or_log
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -40,8 +41,13 @@ async def start(message: Message):
         except Exception as e:
             try:
                 error("handler_exception", where="start", user_id=message.from_user.id, err=str(e))
-            except Exception:
-                pass
+            except Exception as telemetry_e:
+                # If telemetry fails, log it but don't break user flow
+                toast_or_log(
+                    "Telemetry service unavailable",
+                    f"Failed to send telemetry for start command error: {telemetry_e}, original error: {e}",
+                    message.from_user.id
+                )
             await message.answer("Произошла ошибка при запуске")
 
 @router.message(Command("ctx"))
@@ -145,8 +151,8 @@ async def memory_add(message: Message):
                 st, proj, 
                 title=text[:60], 
                 text=text, 
-                chunk_size=settings.chunk_size, 
-                overlap=settings.chunk_overlap,
+                chunk_size=settings.processing.chunk_size,
+                overlap=settings.processing.chunk_overlap,
                 tags=tags if tags else None
             )
             await st.commit()

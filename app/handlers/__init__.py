@@ -9,6 +9,7 @@ from .status import router as status_router
 from .ask import router as ask_router
 from .answer_actions import router as ans_router
 from .import_file import router as import_router
+from .config_handler import router as config_router
 
 # Optional modules — fail safe if missing
 try:
@@ -42,6 +43,7 @@ router.include_router(kb_router)
 
 # 2) Then all the rest
 router.include_router(status_router)
+router.include_router(config_router)
 router.include_router(import_router)
 if memory_router:
     router.include_router(memory_router)

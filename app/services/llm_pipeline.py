@@ -13,6 +13,9 @@ from app.services.token_budget import calculate_token_budget
 from app.services.llm import call_llm_with_retry, LLM_MAX_TOKENS_OUT, LLM_TEMPERATURE, LLM_TIMEOUT
 from app.services.memory import get_preferred_model
 from app.services.telemetry import event, error
+# Structured logging
+import structlog
+logger = structlog.get_logger(__name__)
 
 async def run_llm_pipeline(
     user_id: int,
@@ -26,10 +29,20 @@ async def run_llm_pipeline(
 
     # Budget for logs/diagnostics
     in_budget = calculate_token_budget(user_model, LLM_MAX_TOKENS_OUT)
-    print(f"DEBUG LLM start: model={user_model} tokens_budget={in_budget}")
     
     if not run_id:
         run_id = f"run-{int(time.time())}-{hash(question) % 10000}"
+    
+    logger.info(
+        "LLM pipeline started",
+        action="run_llm_pipeline",
+        user_id=user_id,
+        run_id=run_id,
+        model=user_model,
+        tokens_budget=in_budget,
+        selected_sources_count=len(selected_artifact_ids),
+        question_length=len(question)
+    )
     
     try:
         event("llm_start", user_id=user_id, model=user_model, tokens_budget=in_budget, run_id=run_id)
@@ -38,12 +51,43 @@ async def run_llm_pipeline(
 
     try:
         # Load sources and build prompts
+        logger.debug(
+            "Loading sources and building prompts",
+            action="run_llm_pipeline",
+            user_id=user_id,
+            run_id=run_id,
+            selected_sources=selected_artifact_ids
+        )
         sources, _total_tokens = await load_selected_sources(user_id, selected_artifact_ids)
+        
+        logger.debug(
+            "Sources loaded, building prompts",
+            action="run_llm_pipeline", 
+            user_id=user_id,
+            run_id=run_id,
+            sources_count=len(sources),
+            total_tokens=_total_tokens
+        )
+        
         system_prompt = build_system_prompt()
         context_prompt = build_context_prompt(sources)
         user_prompt = build_user_prompt(question)
 
         # Call LLM
+        logger.debug(
+            "Calling LLM with prompts",
+            action="run_llm_pipeline",
+            user_id=user_id,
+            run_id=run_id,
+            model=user_model,
+            temperature=LLM_TEMPERATURE,
+            max_tokens=LLM_MAX_TOKENS_OUT,
+            timeout=LLM_TIMEOUT,
+            system_prompt_length=len(system_prompt),
+            context_prompt_length=len(context_prompt),
+            user_prompt_length=len(user_prompt)
+        )
+        
         response_text, metadata = await call_llm_with_retry(
             system_prompt=system_prompt,
             context_prompt=context_prompt,
@@ -55,9 +99,21 @@ async def run_llm_pipeline(
         )
 
         metadata = {**metadata, "model": user_model}
-        print(
-            f"DEBUG LLM done: run_id={run_id} used_sources={selected_artifact_ids} len(text)={len(response_text)} duration_ms={metadata.get('duration_ms', 0)}"
+        
+        logger.info(
+            "LLM pipeline completed successfully",
+            action="run_llm_pipeline",
+            user_id=user_id,
+            run_id=run_id,
+            model=user_model,
+            used_sources=selected_artifact_ids,
+            response_length=len(response_text or ""),
+            duration_ms=metadata.get("duration_ms", 0),
+            tokens_in=metadata.get("tokens_in", 0),
+            tokens_out=metadata.get("tokens_out", 0),
+            cost_estimate=metadata.get("cost_estimate", 0)
         )
+        
         try:
             event(
                 "llm_done",
@@ -75,6 +131,18 @@ async def run_llm_pipeline(
         return response_text, selected_artifact_ids, metadata
     
     except Exception as e:
+        logger.error(
+            "LLM pipeline failed",
+            action="run_llm_pipeline",
+            user_id=user_id,
+            run_id=run_id,
+            model=user_model,
+            error=str(e),
+            error_type=type(e).__name__,
+            selected_sources_count=len(selected_artifact_ids),
+            tokens_budget=in_budget
+        )
+        
         # Log LLM error event
         try:
             error(

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 try:
     from openai import AsyncOpenAI
     from openai.types.chat import ChatCompletionMessageParam
-    _client = AsyncOpenAI(api_key=settings.openai_api_key)
+    _client = AsyncOpenAI(api_key=settings.llm.openai_api_key.get_secret_value() if settings.llm.openai_api_key else None)
     OPENAI_AVAILABLE = True
 except ImportError:
     _client = None
