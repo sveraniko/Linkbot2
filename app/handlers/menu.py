@@ -28,7 +28,7 @@ BERLIN = ZoneInfo("Europe/Berlin")
 
 router = Router()
 
-def kb_menu(model: str) -> InlineKeyboardMarkup:
+def kb_menu(model: str, cache_enabled: bool = False) -> InlineKeyboardMarkup:
     """Actions panel layout with single cyclic model button"""
     rows = [
         # Row 1: Status, Memory, Sources, Quiet, Projects
@@ -38,6 +38,10 @@ def kb_menu(model: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🗃 Sources", callback_data="sources:toggle"),
             InlineKeyboardButton(text="🤫 Quiet", callback_data="quiet:toggle"),
             InlineKeyboardButton(text="📂 Projects", callback_data="projects:list"),
+        ],
+        # Row 1.5: Cache toggle
+        [
+            InlineKeyboardButton(text=f"🧠 Cache: {'ON' if cache_enabled else 'OFF'}", callback_data="cache:toggle"),
         ],
         # Row 2: Import and Scope
         [
@@ -79,25 +83,27 @@ def kb_menu(model: str) -> InlineKeyboardMarkup:
 async def menu(message: Message):
     async with session_scope() as session:
         model = await get_preferred_model(session, message.from_user.id if message.from_user else 0)
+        cache_enabled = settings.features.use_cache
         try:
             await message.delete()
         except:
             pass
         if message.bot and message.chat and message.from_user:
             await show_panel(session, message.bot, message.chat.id, message.from_user.id,
-                             "Меню быстрых действий:", kb_menu(model))
+                             "Меню быстрых действий:", kb_menu(model, cache_enabled))
 
 @router.message(Command("actions"))
 async def actions(message: Message):
     async with session_scope() as session:
         model = await get_preferred_model(session, message.from_user.id if message.from_user else 0)
+        cache_enabled = settings.features.use_cache
         try:
             await message.delete()
         except:
             pass
         if message.bot and message.chat and message.from_user:
             await show_panel(session, message.bot, message.chat.id, message.from_user.id,
-                             "Панель действий:", kb_menu(model))
+                             "Панель действий:", kb_menu(model, cache_enabled))
 
 # ── Hints ───────────────────────────────────────────────────────────────────────
 
@@ -594,3 +600,32 @@ async def projects_create(message: Message):
         chat_on, *_ = await get_chat_flags(st, message.from_user.id if message.from_user else 0)
         await message.answer(f"Проект создан и активирован: <b>{escape(name)}</b>")
         await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+
+# ── Cache toggle ────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "cache:toggle")
+async def cache_toggle(cb: CallbackQuery):
+    """Toggle cache feature flag for testing"""
+    from app.db import session_scope
+    
+    # Toggle the cache feature flag
+    settings.features.use_cache = not settings.features.use_cache
+    
+    # Also update cache service initialization if needed
+    from app.services.cache import cache_service
+    if hasattr(cache_service, '_is_available'):
+        cache_service._initialize_connection()
+    
+    status = "ON" if settings.features.use_cache else "OFF"
+    
+    if cb.message and isinstance(cb.message, Message):
+        try:
+            await cb.message.delete()
+        except:
+            pass
+        await cb.message.answer(f"🧠 Cache: {status}\n" + 
+                               ("Redis кэширование включено" if settings.features.use_cache 
+                                else "Кэширование отключено (fallback режим)"))
+        await svc_attach_reply_kb(cb.message, cb.from_user.id if cb.from_user else 0)
+    
+    await cb.answer(f"Cache: {status}")

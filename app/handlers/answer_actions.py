@@ -14,6 +14,8 @@ from html import escape
 from app.services.ui_helpers import show_answer_with_bar, restore_answer_with_bar, attach_reply_kb as svc_attach_reply_kb
 # Import the new tags service
 from app.services.tags import get_presets
+# Import debounce functionality
+from app.utils.debounce import debounce_user_action, execute_with_debounce, debounce_manager
 
 router = Router()
 
@@ -64,7 +66,17 @@ def build_tag_kb(tags: list[str], msg_id: int):
 async def ans_save(cb: CallbackQuery):
     if not cb.data:
         return await cb.answer("Invalid data")
-        
+    
+    msg_id = int(cb.data.split(":")[-1])
+    user_id = cb.from_user.id if cb.from_user else 0
+    
+    # Check debounce - prevent rapid saves
+    if not await debounce_user_action(user_id, msg_id, "save"):
+        return await cb.answer("Подождите...")
+    
+    # Immediate feedback
+    await cb.answer("Сохраняю...")
+    
     async with session_scope() as st:
         msg_id = int(cb.data.split(":")[-1])
         from sqlalchemy import select
@@ -116,7 +128,17 @@ async def ans_save(cb: CallbackQuery):
 async def ans_summary(cb: CallbackQuery):
     if not cb.data:
         return await cb.answer("Invalid data")
-        
+    
+    msg_id = int(cb.data.split(":")[-1])
+    user_id = cb.from_user.id if cb.from_user else 0
+    
+    # Check debounce - prevent rapid summary requests
+    if not await debounce_user_action(user_id, msg_id, "summary"):
+        return await cb.answer("Подождите...")
+    
+    # Immediate feedback
+    await cb.answer("Создаю summary...")
+    
     async with session_scope() as st:
         msg_id = int(cb.data.split(":")[-1])
         from sqlalchemy import select
@@ -230,7 +252,17 @@ async def ans_del(cb: CallbackQuery):
 async def ans_tag(cb: CallbackQuery):
     if not cb.data:
         return await cb.answer("Invalid data")
+    
     msg_id = int(cb.data.split(":")[-1])
+    user_id = cb.from_user.id if cb.from_user else 0
+    
+    # Check debounce - prevent rapid tag operations
+    if not await debounce_user_action(user_id, msg_id, "tag"):
+        return await cb.answer("Подождите...")
+    
+    # Immediate feedback
+    await cb.answer()
+    
     async with session_scope() as st:
         # project-specific пресеты
         bm = (await st.execute(sa.select(BotMessage).where(BotMessage.tg_message_id==msg_id))).scalars().first()
@@ -566,12 +598,20 @@ def build_imp_tag_kb(tags: list[str], art_id: int):
 async def ans_refine(cb: CallbackQuery):
     if not cb.data:
         return await cb.answer("Invalid data")
+    
     msg_id = int(cb.data.split(":")[-1])
+    user_id = cb.from_user.id if cb.from_user else 0
+    
+    # Check debounce - prevent rapid refine operations (these are expensive LLM calls)
+    if not await debounce_user_action(user_id, msg_id, "refine"):
+        return await cb.answer("Подождите...")
+    
+    # Immediate feedback
+    await cb.answer()
     
     # Show ForceReply to ask for refinement details
     if cb.message and isinstance(cb.message, Message):
         await cb.message.answer("Чем уточнить?", reply_markup=ForceReply(selective=True))
-    await cb.answer()
 
 
 # Handle the refinement reply
@@ -584,50 +624,65 @@ async def refine_reply(message: Message):
     
     if not message.reply_to_message or not message.text:
         return
-        
-    # Get the original BotMessage to retrieve artifact_ids
-    async with session_scope() as st:
-        # Get the most recent BotMessage for this user
-        stmt = sa.select(BotMessage).where(BotMessage.user_id == (message.from_user.id if message.from_user else 0)).order_by(BotMessage.created_at.desc()).limit(1)
-        result = await st.execute(stmt)
-        bm = result.scalar_one_or_none()
-        
-        if not bm:
-            await message.answer("Не найдено сообщение для уточнения.")
-            await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
-            return
+    
+    user_id = message.from_user.id if message.from_user else 0
+    
+    # Use debounce with idempotency for expensive LLM operations
+    async def perform_refine():
+        # Get the original BotMessage to retrieve artifact_ids
+        async with session_scope() as st:
+            # Get the most recent BotMessage for this user
+            stmt = sa.select(BotMessage).where(BotMessage.user_id == user_id).order_by(BotMessage.created_at.desc()).limit(1)
+            result = await st.execute(stmt)
+            bm = result.scalar_one_or_none()
             
-        proj = await get_active_project(st, message.from_user.id if message.from_user else 0)
-        if not proj:
-            await message.answer("Сначала выберите проект: <code>/project <name></code>")
-            await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
-            return
+            if not bm:
+                await message.answer("Не найдено сообщение для уточнения.")
+                await svc_attach_reply_kb(message, user_id)
+                return
+                
+            proj = await get_active_project(st, user_id)
+            if not proj:
+                await message.answer("Сначала выберите проект: <code>/project <name></code>")
+                await svc_attach_reply_kb(message, user_id)
+                return
+                
+            # Get context - if we have selected artifacts, use them, otherwise use default context
+            stt = await _ensure_user_state(st, user_id)
+            sel_ids = [int(x) for x in (stt.selected_artifact_ids or "").split(",") if x.strip().isdigit()]
             
-        # Get context - if we have selected artifacts, use them, otherwise use default context
-        stt = await _ensure_user_state(st, message.from_user.id if message.from_user else 0)
-        sel_ids = [int(x) for x in (stt.selected_artifact_ids or "").split(",") if x.strip().isdigit()]
-        
-        if sel_ids:
-            # Use selected artifacts for context
-            chunks = await get_chunks_by_artifact_ids(st, sel_ids, limit=200)
-        else:
-            # Use default context gathering
-            chunks = await gather_context(st, proj, user_id=message.from_user.id if message.from_user else 0, max_chunks=settings.processing.project_max_chunks)
-            
-        model = await get_preferred_model(st, message.from_user.id if message.from_user else 0)
-        answer = await ask_llm(message.text, chunks, model=model)
+            if sel_ids:
+                # Use selected artifacts for context
+                chunks = await get_chunks_by_artifact_ids(st, sel_ids, limit=200)
+            else:
+                # Use default context gathering
+                chunks = await gather_context(st, proj, user_id=user_id, max_chunks=settings.processing.project_max_chunks)
+                
+            model = await get_preferred_model(st, user_id)
+            answer = await ask_llm(message.text, chunks, model=model)
 
-        sent_msg = await message.answer(answer)
-        await svc_attach_reply_kb(message, message.from_user.id if message.from_user else 0)
+            sent_msg = await message.answer(answer)
+            await svc_attach_reply_kb(message, user_id)
+            
+            # Save the answer to BotMessage for future actions
+            new_bm = BotMessage(
+                chat_id=message.chat.id if message.chat else 0,
+                user_id=user_id,
+                tg_message_id=sent_msg.message_id if sent_msg else 0,
+                reply_to_user_msg_id=message.message_id,
+                project_id=proj.id,
+                saved=False
+            )
+            st.add(new_bm)
+            await st.commit()
+            
+            return answer
+    
+    try:
+        # Execute with idempotency protection - same refinement won't run twice
+        refine_key = debounce_manager.create_key(user_id, message.message_id, "refine_llm")
+        await debounce_manager.execute_with_idempotency(refine_key, perform_refine)
         
-        # Save the answer to BotMessage for future actions
-        new_bm = BotMessage(
-            chat_id=message.chat.id if message.chat else 0,
-            user_id=message.from_user.id if message.from_user else 0,
-            tg_message_id=sent_msg.message_id if sent_msg else 0,
-            reply_to_user_msg_id=message.message_id,
-            project_id=proj.id,
-            saved=False
-        )
-        st.add(new_bm)
-        await st.commit()
+    except Exception as e:
+        await message.answer(f"Ошибка при уточнении: {str(e)}")
+        await svc_attach_reply_kb(message, user_id)

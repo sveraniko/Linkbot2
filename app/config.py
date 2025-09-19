@@ -81,6 +81,10 @@ class MinIOSettings(BaseSettings):
 class TelegramSettings(BaseSettings):
     """Telegram Bot configuration"""
     token: Optional[SecretStr] = Field(default=None, description="Telegram bot token")
+    webhook_url: Optional[str] = Field(default=None, description="Webhook base URL (without path)")
+    webhook_path: str = Field(default="/webhook", description="Webhook path")
+    use_webhook: bool = Field(default=False, description="Use webhook instead of polling")
+    webhook_secret: Optional[SecretStr] = Field(default=None, description="Webhook secret for verification")
     
     @validator('token')
     def validate_bot_token(cls, v):
@@ -90,10 +94,21 @@ class TelegramSettings(BaseSettings):
                 raise ValueError('Bot token must be in format "bot_id:bot_secret"')
         return v
     
+    @validator('webhook_url')
+    def validate_webhook_url(cls, v):
+        if v and not v.startswith('https://'):
+            logger.warning("Webhook URL should use HTTPS for production", url=v)
+        return v
+    
     @property
     def is_configured(self) -> bool:
         """Check if Telegram is properly configured"""
         return bool(self.token)
+    
+    @property
+    def webhook_configured(self) -> bool:
+        """Check if webhook is properly configured"""
+        return bool(self.use_webhook and self.webhook_url)
     
     @property
     def bot_token(self) -> Optional[SecretStr]:
@@ -157,12 +172,48 @@ class UISettings(BaseSettings):
     class Config:
         env_prefix = "UI_"
 
+class RedisSettings(BaseSettings):
+    """Redis configuration for caching and queues"""
+    host: str = Field(default="localhost", description="Redis host")
+    port: int = Field(default=6379, ge=1, le=65535, description="Redis port")
+    db: int = Field(default=0, ge=0, le=15, description="Redis database number")
+    password: Optional[SecretStr] = Field(default=None, description="Redis password")
+    ssl: bool = Field(default=False, description="Use SSL for Redis connection")
+    connection_pool_size: int = Field(default=20, ge=1, le=100, description="Redis connection pool size")
+    
+    @property
+    def is_configured(self) -> bool:
+        """Check if Redis is properly configured"""
+        return bool(self.host and self.port)
+    
+    class Config:
+        env_prefix = "REDIS_"
+
+class FeatureFlags(BaseSettings):
+    """Feature flags for safe rollout of optimizations"""
+    use_webhook: bool = Field(default=False, description="Enable webhook mode")
+    use_cache: bool = Field(default=False, description="Enable Redis caching")
+    use_debounce: bool = Field(default=False, description="Enable click debouncing")
+    use_connection_pools: bool = Field(default=False, description="Enable HTTP connection pooling")
+    use_rate_limiting: bool = Field(default=False, description="Enable rate limiting")
+    use_queue: bool = Field(default=False, description="Enable task queuing")
+    
+    class Config:
+        env_prefix = "FEATURE_"
+
 class SecuritySettings(BaseSettings):
     """Security and retry configuration"""
     max_retries: int = Field(default=3, ge=1, le=10, description="Maximum retry attempts")
     retry_base_delay: float = Field(default=1.0, ge=0.1, le=5.0, description="Base retry delay in seconds")
     retry_max_delay: float = Field(default=10.0, ge=1.0, le=60.0, description="Max retry delay in seconds")
     cache_ttl: int = Field(default=3600, ge=60, le=86400, description="Cache TTL in seconds")
+    
+    # Rate limiting settings
+    ask_rate_limit: int = Field(default=10, ge=1, le=100, description="Ask requests per minute per user")
+    refine_rate_limit: int = Field(default=20, ge=1, le=100, description="Refine requests per minute per user")
+    
+    # Debounce settings
+    debounce_timeout_ms: int = Field(default=500, ge=100, le=2000, description="Debounce timeout in milliseconds")
     
     @validator('retry_max_delay')
     def validate_max_delay(cls, v, values):
@@ -204,6 +255,7 @@ class Settings(BaseSettings):
     
     # Nested settings
     database: DatabaseSettings = DatabaseSettings()
+    redis: RedisSettings = RedisSettings()
     minio: MinIOSettings = MinIOSettings()
     telegram: TelegramSettings = TelegramSettings()
     llm: LLMSettings = LLMSettings()
@@ -211,6 +263,7 @@ class Settings(BaseSettings):
     ui: UISettings = UISettings()
     security: SecuritySettings = SecuritySettings()
     monitoring: MonitoringSettings = MonitoringSettings()
+    features: FeatureFlags = FeatureFlags()
     
     def __init__(self, **data):
         """Initialize settings with validation"""
@@ -221,9 +274,11 @@ class Settings(BaseSettings):
                 "Configuration loaded successfully",
                 environment=self.environment.value,
                 database_configured=bool(self.database.url),
+                redis_configured=self.redis.is_configured,
                 minio_configured=self.minio.is_configured,
                 llm_configured=self.llm.is_configured,
-                sentry_configured=self.monitoring.is_sentry_configured
+                sentry_configured=self.monitoring.is_sentry_configured,
+                webhook_configured=self.telegram.webhook_configured
             )
         except Exception as e:
             logger.error(
@@ -264,6 +319,7 @@ class Settings(BaseSettings):
         
         # Reinitialize nested settings
         self.database = DatabaseSettings()
+        self.redis = RedisSettings()
         self.minio = MinIOSettings()
         self.telegram = TelegramSettings()
         self.llm = LLMSettings()
@@ -271,6 +327,7 @@ class Settings(BaseSettings):
         self.ui = UISettings()
         self.security = SecuritySettings()
         self.monitoring = MonitoringSettings()
+        self.features = FeatureFlags()
         
         self._validate_configuration()
         logger.info("Configuration reloaded successfully")

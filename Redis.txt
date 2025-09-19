@@ -1,0 +1,194 @@
+отлично — база есть, осталось «включить» и дать тумблер в боте. Ниже — короткий план, который реально работает: что править, где, и как выключать кэш на время тестов.
+
+---
+
+# 1) Инфра: убедиться, что Redis есть и доступен
+
+**docker-compose.yml** (если уже есть — проверь команду и том):
+
+```yaml
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server","--appendonly","yes"]   # AOF, чтобы переживал рестарт
+    ports: ["6379:6379"]
+    volumes: ["./.data/redis:/data"]
+```
+
+**.env**:
+
+```
+REDIS_URL=redis://redis:6379/0
+CACHE_ENABLED=true          # глобальный флаг кэша
+FSM_BACKEND=redis           # чтобы FSM ушёл в Redis
+```
+
+# 2) Settings (Pydantic)
+
+```python
+# app/core/config.py
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    redis_url: str = "redis://redis:6379/0"
+    cache_enabled: bool = True
+    fsm_backend: str = "redis"  # "memory" | "redis"
+    cache_default_ttl_s: int = 120
+
+settings = Settings()
+```
+
+# 3) Подключение Redis (один-единственный клиент)
+
+```python
+# app/core/redis_client.py
+import redis.asyncio as redis
+from app.core.config import settings
+
+redis_client: redis.Redis | None = None
+
+async def get_redis() -> redis.Redis:
+    global redis_client
+    if redis_client is None:
+        redis_client = await redis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+    return redis_client
+```
+
+# 4) FSM на Redis (aiogram)
+
+```python
+# app/bot.py (или где создаётся Dispatcher)
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.redis import RedisStorage, DefaultKeyBuilder
+from app.core.config import settings
+from app.core.redis_client import get_redis
+
+async def build_storage():
+    if settings.fsm_backend == "redis":
+        r = await get_redis()
+        return RedisStorage(r, key_builder=DefaultKeyBuilder(with_bot_id=True))
+    return MemoryStorage()
+```
+
+# 5) Кэш-обёртка (универсальная) + глобальный флаг
+
+```python
+# app/services/cache.py
+import json, hashlib
+from typing import Any, Callable, Awaitable
+from app.core.config import settings
+from app.core.redis_client import get_redis
+
+def _k(s: str) -> str: return f"cache:{s}"
+
+async def cache_get(key: str) -> Any:
+    if not settings.cache_enabled: return None
+    r = await get_redis()
+    raw = await r.get(_k(key))
+    return json.loads(raw) if raw else None
+
+async def cache_set(key: str, value: Any, ttl: int | None = None):
+    if not settings.cache_enabled: return
+    r = await get_redis()
+    await r.set(_k(key), json.dumps(value), ex=ttl or settings.cache_default_ttl_s)
+
+def cache_key_for_list(project_ids: list[int], mode: str|None, term: str|None, page: int) -> str:
+    payload = json.dumps({"p": sorted(project_ids), "m": mode, "t": term or "", "pg": page}, sort_keys=True)
+    return "artifacts:" + hashlib.md5(payload.encode()).hexdigest()
+```
+
+# 6) Применяем кэш к списку источников
+
+В месте, где отрисовывается лист (ASK List), **перед SQL**:
+
+```python
+# app/handlers/ask.py (в рендере страницы)
+from app.services.cache import cache_get, cache_set, cache_key_for_list
+
+key = cache_key_for_list(project_ids, filt.get("mode"), filt.get("term"), page)
+rows = await cache_get(key)
+if rows is None:
+    rows = await list_artifacts(session, project_ids=project_ids, mode=..., term=..., artifact_id=..., limit=5, offset=(page-1)*5)
+    # сериализуем легковесно (id, title, tags, created_at), чтобы не тянуть ORM в кэш
+    serial = [{"id": a.id, "title": a.title, "tags": [t.name for t in a.tags], "created_at": a.created_at.isoformat()} for a in rows]
+    await cache_set(key, serial)
+else:
+    # десериализуем в легкие DTO и рендерим
+    pass
+```
+
+> Важно: для тестов кэш можно **глобально** выключить `CACHE_ENABLED=false` или кнопкой в боте (см. ниже).
+
+# 7) Инвалидация (без `SCAN*`)
+
+Чтобы не чистить паттернами, используем «версионирование пространства ключей»:
+
+```python
+# app/services/cache_namespace.py
+NAMESPACE_KEY = "cache:ns:artifacts"
+
+async def ns_val() -> str:
+    r = await get_redis()
+    v = await r.get(NAMESPACE_KEY)
+    return v or "v1"
+
+async def ns_bump():
+    r = await get_redis()
+    await r.incr(NAMESPACE_KEY)  # увеличили «версию» — все старые ключи считаем протухшими
+```
+
+В `cache_key_for_list` добавляй suffix текущего `ns_val()` → после импорта/удаления источника вызывай `ns_bump()` и не нужно ничего «сканировать».
+
+# 8) Тумблер кэша в Actions (в боте)
+
+Добавляем кнопку `🧠 Cache: ON/OFF` в Actions-панель:
+
+* **Глобальный вариант** (на весь бот): хранить флаг в Redis `flag:cache_enabled` и читать его при старте и по таймеру; либо **проще** — менять `settings.cache_enabled` в рантайме и писать в Redis для персиста.
+* **Пользовательский вариант** (только для тебя при тестах): хранить `flag:cache_enabled:{user_id}`; при рендере выбирать `user_flag` если задан, иначе глобальный.
+
+Пример хендлера:
+
+```python
+# app/handlers/actions.py
+from app.core.config import settings
+from app.core.redis_client import get_redis
+
+@router.callback_query(F.data == "actions:toggle_cache")
+async def toggle_cache(cb: CallbackQuery):
+    r = await get_redis()
+    new = not settings.cache_enabled
+    settings.cache_enabled = new
+    await r.set("flag:cache_enabled", "1" if new else "0")
+    await cb.answer(f"Cache {'ON' if new else 'OFF'}")
+    # перерисовать панель
+```
+
+При старте приложения считывай флаг из Redis, если есть:
+
+```python
+r = await get_redis()
+val = await r.get("flag:cache_enabled")
+if val is not None:
+    settings.cache_enabled = (val == "1")
+```
+
+# 9) FSM/антидубль (по желанию, но очень полезно)
+
+* **FSM**: уже включили (п.4).
+* **Антидубль кнопок** (двойной тап):
+  `SETNX idemp:{user}:{msg}:{data} 1 EX 5` перед обработкой; если вернуло 0 — игнорим повтор.
+
+# 10) Мониторинг и тесты
+
+* Логируй **cache hit / miss** и TTL для листа → сразу видно, кэш живой.
+* На время теста: жми `🧠 Cache: OFF` **или** ставь `.env → CACHE_ENABLED=false` и перезапуск.
+* В проде — `CACHE_ENABLED=true`, TTL 60–120 сек, а инвалидация — через `ns_bump()` на события: импорт, удаление, правка.
+
+---
+
+## Итог
+
+* **Да**, Redis нужно «включить» в docker и в настройках (URL, флаги).
+* FSM переносим на Redis, кэш заворачиваем в простую обёртку, добавляем **тумблер в Actions** (`🧠 Cache: ON/OFF`) и **версионированную инвалидацию** без тяжёлых `SCAN`.
+* На тестах кэш **выключаем** кнопкой или через `.env`, чтобы видеть честное поведение.
+

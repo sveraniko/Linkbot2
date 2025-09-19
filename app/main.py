@@ -4,6 +4,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import MenuButtonCommands, BotCommand
 from aiogram.exceptions import TelegramUnauthorizedError, TelegramAPIError
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.redis import RedisStorage, DefaultKeyBuilder
 from app.config import settings
 from app.utils.config_manager import config_manager, get_environment_info
 from app.handlers import router as root_router
@@ -13,6 +15,42 @@ from app.utils.logging_setup import setup_structured_logging, setup_sentry, logg
 # Initialize structured logging and monitoring
 setup_structured_logging()
 setup_sentry()
+
+async def build_storage():
+    """Create FSM storage - Redis if cache enabled, Memory otherwise"""
+    if settings.features.use_cache and settings.redis.is_configured:
+        try:
+            # Try to connect to Redis
+            import redis.asyncio as redis
+            redis_client = redis.Redis(
+                host=settings.redis.host,
+                port=settings.redis.port,
+                db=settings.redis.db,
+                decode_responses=True
+            )
+            
+            # Test connection
+            await redis_client.ping()
+            
+            storage = RedisStorage(
+                redis=redis_client,
+                key_builder=DefaultKeyBuilder(with_bot_id=True, with_destiny=True)
+            )
+            
+            logger.info("FSM storage initialized with Redis", 
+                       component="storage", action="fsm_init",
+                       host=settings.redis.host, port=settings.redis.port)
+            return storage
+            
+        except Exception as e:
+            logger.warning("Failed to connect to Redis, falling back to Memory storage",
+                          component="storage", action="fsm_init", 
+                          error=str(e))
+            
+    # Fallback to memory storage
+    logger.info("FSM storage initialized with Memory", 
+               component="storage", action="fsm_init")
+    return MemoryStorage()
 
 async def main():
     logger.info("Starting Telegram bot", component="main", action="startup")
@@ -58,9 +96,10 @@ async def main():
                     component="telegram", action="set_commands", 
                     error=str(e))
     
-    # Create dispatcher and start polling
+    # Create storage and dispatcher
     try:
-        dp = Dispatcher()
+        storage = await build_storage()
+        dp = Dispatcher(storage=storage)
         dp.include_router(root_router)
         logger.info("Routers registered, starting polling", 
                    component="dispatcher", action="start_polling")

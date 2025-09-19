@@ -1,0 +1,56 @@
+PowerShell 7.5.3
+PS C:\Users\UraJura> linkbot
+[+] Running 2/2                                                                                                          ✔ Container project-memory-bot-minio-1  Started                                                                   0.4s  ✔ Container project-memory-bot-db-1     Started                                                                   0.4s Waiting for MinIO health check: http://localhost:9100/minio/health/ready                                                MinIO is ready!
+[+] Creating 2/2
+ ✔ Container project-memory-bot-minio-1  Running                                                                   0.0s
+ ✔ Container project-memory-bot-db-1     Running                                                                   0.0s
+2025-09-19 18:07:05 [info     ] Configuration loaded successfully database_configured=True environment=development llm_configured=True minio_configured=True redis_configured=True sentry_configured=False webhook_configured=False
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+[+] Building 3.4s (14/14) FINISHED
+ => [internal] load local bake definitions                                                                         0.1s
+ => => reading from stdin 540B                                                                                     0.1s
+ => [internal] load build definition from Dockerfile                                                               0.0s
+ => => transferring dockerfile: 356B                                                                               0.0s
+ => [internal] load metadata for docker.io/library/python:3.11-slim                                                2.0s
+ => [auth] library/python:pull token for registry-1.docker.io                                                      0.0s
+ => [internal] load .dockerignore                                                                                  0.0s
+ => => transferring context: 2B                                                                                    0.0s
+ => [1/6] FROM docker.io/library/python:3.11-slim@sha256:a0939570b38cddeb861b8e75d20b1c8218b21562b18f301171904b54  0.0s
+ => => resolve docker.io/library/python:3.11-slim@sha256:a0939570b38cddeb861b8e75d20b1c8218b21562b18f301171904b54  0.0s
+ => [internal] load build context                                                                                  0.1s
+ => => transferring context: 288.01kB                                                                              0.1s
+ => CACHED [2/6] WORKDIR /app                                                                                      0.0s
+ => CACHED [3/6] RUN apt-get update && apt-get install -y --no-install-recommends build-essential git && rm -rf /  0.0s
+ => CACHED [4/6] COPY requirements.txt /app/requirements.txt                                                       0.0s
+ => CACHED [5/6] RUN pip install --no-cache-dir -r /app/requirements.txt                                           0.0s
+ => [6/6] COPY . /app                                                                                              0.2s
+ => exporting to image                                                                                             0.4s
+ => => exporting layers                                                                                            0.2s
+ => => exporting manifest sha256:c039fec655067d10997c2fe0172f27ce7594a1e330cf6ad2d64f0fe56872ac42                  0.0s
+ => => exporting config sha256:edb4d5c136b16d2e7d8b7ab9a508df74d2de23a0647376758734e2b221e45060                    0.0s
+ => => exporting attestation manifest sha256:a74274e9361d6754cb820b235800730c32709e848790e9b3edf08720790f0907      0.0s
+ => => exporting manifest list sha256:2e7708bf5f9f634293c281a33ad12c8a2001c07c48fee1b0f2ea057452a4dc10             0.0s
+ => => naming to docker.io/library/project-memory-bot-bot:latest                                                   0.0s
+ => => unpacking to docker.io/library/project-memory-bot-bot:latest                                                0.1s
+ => resolving provenance for metadata file                                                                         0.0s
+[+] Running 4/4
+ ✔ project-memory-bot-bot                Built                                                                     0.0s
+ ✔ Container project-memory-bot-db-1     Healthy                                                                   0.8s
+ ✔ Container project-memory-bot-minio-1  Healthy                                                                   0.8s
+ ✔ Container project-memory-bot-bot-1    Started                                                                   1.0s
+bot-1  | 2025-09-19 18:07:11 [info     ] Configuration loaded successfully database_configured=True environment=development llm_configured=True minio_configured=True redis_configured=True sentry_configured=False webhook_configured=False
+bot-1  | INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+bot-1  | INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+bot-1  | INFO  [alembic.runtime.migration] Will assume transactional DDL.
+bot-1  | INFO  [alembic.runtime.migration] Will assume transactional DDL.
+bot-1  | 2025-09-19 18:07:13 [info     ] Configuration loaded successfully database_configured=True environment=development llm_configured=True minio_configured=True redis_configured=True sentry_configured=False webhook_configured=False
+bot-1  | {"event": "Sentry DSN not configured, skipping Sentry setup", "logger": "app.utils.logging_setup", "level": "info", "timestamp": "2025-09-19T18:07:20.109206Z"}
+bot-1  | {"component": "main", "action": "startup", "event": "Starting Telegram bot", "logger": "app.utils.logging_setup", "level": "info", "timestamp": "2025-09-19T18:07:20.109561Z"}
+bot-1  | {"component": "storage", "action": "bucket_check", "event": "MinIO bucket ensured", "logger": "app.utils.logging_setup", "level": "info", "timestamp": "2025-09-19T18:07:20.112618Z"}
+bot-1  | {"component": "telegram", "action": "set_commands", "event": "Bot commands set successfully", "logger": "app.utils.logging_setup", "level": "info", "timestamp": "2025-09-19T18:07:20.595457Z"}
+bot-1  | {"component": "dispatcher", "action": "start_polling", "event": "Routers registered, starting polling", "logger": "app.utils.logging_setup", "level": "info", "timestamp": "2025-09-19T18:07:20.595867Z"}
+bot-1  | Start polling
+bot-1  | Run polling for bot @ProjectMemory_Bot id=8386572026 - 'ProjectMemoryBot'

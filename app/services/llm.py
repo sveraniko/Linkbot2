@@ -4,6 +4,7 @@ import logging
 import asyncio
 import time
 from typing import Tuple, List, Dict, Any, Optional
+import httpx
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -11,15 +12,57 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# LLM configuration from environment variables
+# LLM configuration from settings (with fallback to env vars)
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "60"))
-LLM_MAX_TOKENS_OUT = int(os.getenv("LLM_MAX_TOKENS_OUT", "2048"))
-LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-LLM_DISABLED = os.getenv("LLM_DISABLED", "0") == "1"
+LLM_TIMEOUT = settings.llm.timeout if hasattr(settings.llm, 'timeout') else int(os.getenv("LLM_TIMEOUT", "60"))
+LLM_MAX_TOKENS_OUT = settings.llm.max_tokens_out if hasattr(settings.llm, 'max_tokens_out') else int(os.getenv("LLM_MAX_TOKENS_OUT", "2048"))
+LLM_TEMPERATURE = settings.llm.temperature if hasattr(settings.llm, 'temperature') else float(os.getenv("LLM_TEMPERATURE", "0.7"))
+LLM_DISABLED = settings.llm.disabled if hasattr(settings.llm, 'disabled') else (os.getenv("LLM_DISABLED", "0") == "1")
 
-# Initialize OpenAI client
-client = AsyncOpenAI(api_key=settings.llm.openai_api_key.get_secret_value() if settings.llm.openai_api_key else None) if settings.llm.openai_api_key else None
+# Initialize HTTP client with connection pooling for OpenAI
+def _create_http_client() -> Optional[httpx.AsyncClient]:
+    """Create HTTP client with connection pooling if feature flag enabled"""
+    if not settings.features.use_connection_pools:
+        return None
+    
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            connect=30.0,
+            read=float(LLM_TIMEOUT),
+            write=30.0,
+            pool=10.0
+        ),
+        limits=httpx.Limits(
+            max_keepalive_connections=10,
+            max_connections=20,
+            keepalive_expiry=300.0
+        )
+        # Note: HTTP/2 disabled to avoid h2 dependency
+        # Connection pooling works fine with HTTP/1.1
+    )
+
+# Initialize OpenAI client with optional connection pooling
+def _create_openai_client() -> Optional[AsyncOpenAI]:
+    """Create OpenAI client with optional HTTP connection pooling"""
+    if not settings.llm.openai_api_key:
+        return None
+    
+    http_client = _create_http_client()
+    
+    client_kwargs = {
+        "api_key": settings.llm.openai_api_key.get_secret_value(),
+        "timeout": float(LLM_TIMEOUT)
+    }
+    
+    if http_client:
+        client_kwargs["http_client"] = http_client
+        logger.info("OpenAI client initialized with connection pooling")
+    else:
+        logger.info("OpenAI client initialized without connection pooling")
+    
+    return AsyncOpenAI(**client_kwargs)
+
+client = _create_openai_client()
 
 # HOTFIX: put near your OpenAI call builder
 TEMPERATURE_SUPPORTED = (
